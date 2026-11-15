@@ -90,6 +90,7 @@ std::vector<StaticMesh> readStaticMeshes(const Pack& pack, size_t* skipped) {
         if (f[19] > data.size() || indexBytes > data.size() - f[19]) continue;
 
         StaticMesh m;
+        m.recordOffset = uint32_t(rec);
         m.nameOid = f[0];
         m.materialOffset = f[2];
         for (int c = 0; c < 3; c++) {
@@ -151,6 +152,49 @@ std::vector<StaticMesh> readStaticMeshes(const Pack& pack, size_t* skipped) {
             if (slot == 1 && m.colorTextureOid == 0) m.colorTextureOid = oid;
         }
         out.push_back(std::move(m));
+    }
+    return out;
+}
+
+std::vector<MeshInstance> readMeshInstances(const Pack& pack, const std::vector<StaticMesh>& meshes, size_t* missing,
+                                            uint32_t staticObjectClass) {
+    // A static object holds three tables (pointer, count) at +0x90, +0x98 and +0xA8:
+    //   pieces      10 bytes: u16 0, u16 transform index, u16 flags << 13 | mesh index, u16 name, s16 ?
+    //   transforms  12 floats, a 3x4 row-major matrix
+    //   meshes      the 0x60-byte mesh records
+    std::vector<MeshInstance> out;
+    if (missing) *missing = 0;
+    const auto data = pack.data();
+    std::vector<std::pair<uint32_t, uint32_t>> byRecord;   // record offset -> index in `meshes`
+    for (uint32_t i = 0; i < meshes.size(); i++) byRecord.emplace_back(meshes[i].recordOffset, i);
+    std::sort(byRecord.begin(), byRecord.end());
+    for (uint32_t obj : pack.objects()) {
+        if (size_t(obj) + 0xB0 > data.size() || pack.word(obj) != staticObjectClass) continue;
+        const uint32_t pieces = pack.word(size_t(obj) + 0x90), pieceCount = pack.word(size_t(obj) + 0x94);
+        const uint32_t mats = pack.word(size_t(obj) + 0x98), matCount = pack.word(size_t(obj) + 0x9C);
+        const uint32_t recs = pack.word(size_t(obj) + 0xA8), recCount = pack.word(size_t(obj) + 0xAC);
+        if (pieceCount == 0 || matCount == 0 || recCount == 0) continue;
+        if (!pack.isPointer(size_t(obj) + 0x90) || !pack.isPointer(size_t(obj) + 0x98) || !pack.isPointer(size_t(obj) + 0xA8)) continue;
+        if (pieces > data.size() || size_t(pieceCount) * 10 > data.size() - pieces) continue;
+        if (mats > data.size() || size_t(matCount) * 48 > data.size() - mats) continue;
+        for (uint32_t i = 0; i < pieceCount; i++) {
+            const uint8_t* e = data.data() + pieces + size_t(i) * 10;
+            const uint32_t transform = uint32_t(e[2]) << 8 | e[3], field = uint32_t(e[4]) << 8 | e[5];
+            const uint32_t meshIndex = field & 0x1FFF;
+            if (transform >= matCount || meshIndex >= recCount) continue;
+            const uint32_t record = recs + meshIndex * 0x60;
+            const auto it = std::lower_bound(byRecord.begin(), byRecord.end(), std::make_pair(record, 0u));
+            if (it == byRecord.end() || it->first != record) {
+                if (missing) ++*missing;
+                continue;
+            }
+            MeshInstance inst;
+            inst.mesh = it->second;
+            inst.objectOid = pack.word(size_t(obj) + 12);
+            inst.flags = field >> 13;
+            for (int k = 0; k < 12; k++) inst.matrix[size_t(k)] = f32(data.data() + mats + size_t(transform) * 48 + size_t(k) * 4);
+            out.push_back(inst);
+        }
     }
     return out;
 }

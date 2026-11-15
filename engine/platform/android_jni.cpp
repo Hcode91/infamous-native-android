@@ -302,20 +302,36 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_world(JNIEnv* env, j
             slotOf[oid] = slot;
             return slot;
         };
-        // Draw order: grouped by texture so each texture is bound once.
-        std::vector<std::pair<uint32_t, const StaticMesh*>> order;
-        for (const StaticMesh& m : meshes) order.emplace_back(m.uvs.empty() ? 0xFFFFFFFFu : textureFor(m.colorTextureOid), &m);
+        // Every ordinary piece is put in place with its transform. Draw order is grouped by texture so each
+        // texture is bound once.
+        size_t missingPieces = 0;
+        const std::vector<MeshInstance> instances = readMeshInstances(p, meshes, &missingPieces);
+        std::vector<std::pair<uint32_t, const MeshInstance*>> order;
+        for (const MeshInstance& in : instances) {
+            if (in.flags != 0) continue;
+            const StaticMesh& m = meshes[in.mesh];
+            order.emplace_back(m.uvs.empty() ? 0xFFFFFFFFu : textureFor(m.colorTextureOid), &in);
+        }
         std::stable_sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
         std::vector<VkRenderer::Batch> batches;
-        for (const auto& [tex, mp] : order) {
-            const StaticMesh& m = *mp;
+        std::vector<float> placed;
+        for (const auto& [tex, ip] : order) {
+            const StaticMesh& m = meshes[ip->mesh];
+            const auto& tm = ip->matrix;
             const uint32_t base = uint32_t(verts.size() / 8);
             const size_t nv = m.positions.size() / 3;
+            placed.resize(nv * 3);
+            for (size_t v = 0; v < nv; v++) {
+                const float x = m.positions[v * 3], y = m.positions[v * 3 + 1], z = m.positions[v * 3 + 2];
+                placed[v * 3] = tm[0] * x + tm[1] * y + tm[2] * z + tm[3];
+                placed[v * 3 + 1] = tm[4] * x + tm[5] * y + tm[6] * z + tm[7];
+                placed[v * 3 + 2] = tm[8] * x + tm[9] * y + tm[10] * z + tm[11];
+            }
             std::vector<float> normal(nv * 3, 0.0f);
             for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
-                const float* a = &m.positions[m.indices[t] * 3];
-                const float* b = &m.positions[m.indices[t + 1] * 3];
-                const float* c = &m.positions[m.indices[t + 2] * 3];
+                const float* a = &placed[m.indices[t] * 3];
+                const float* b = &placed[m.indices[t + 1] * 3];
+                const float* c = &placed[m.indices[t + 2] * 3];
                 const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, v[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
                 const float fn[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
                 for (int k = 0; k < 3; k++)
@@ -324,7 +340,7 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_world(JNIEnv* env, j
             for (size_t v = 0; v < nv; v++) {
                 const float* nn = &normal[v * 3];
                 const float len = std::sqrt(nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]);
-                for (int c2 = 0; c2 < 3; c2++) verts.push_back(m.positions[v * 3 + c2]);
+                for (int c2 = 0; c2 < 3; c2++) verts.push_back(placed[v * 3 + c2]);
                 for (int c2 = 0; c2 < 3; c2++) verts.push_back(len > 0 ? nn[c2] / len : (c2 == 2 ? 1.0f : 0.0f));
                 verts.push_back(m.uvs.empty() ? 0.0f : m.uvs[v * 2]);
                 verts.push_back(m.uvs.empty() ? 0.0f : m.uvs[v * 2 + 1]);
@@ -332,9 +348,11 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_world(JNIEnv* env, j
             if (batches.empty() || batches.back().texture != tex) batches.push_back({uint32_t(idx.size()), 0, tex});
             for (uint32_t i : m.indices) idx.push_back(base + i);
             batches.back().indexCount += uint32_t(m.indices.size());
-            cx.push_back(0.5f * (m.boxMin[0] + m.boxMax[0]));
-            cy.push_back(0.5f * (m.boxMin[1] + m.boxMax[1]));
-            cz.push_back(0.5f * (m.boxMin[2] + m.boxMax[2]));
+            if (nv) {   // where this piece ended up: its first vertex is close enough for aiming the camera
+                cx.push_back(placed[0]);
+                cy.push_back(placed[1]);
+                cz.push_back(placed[2]);
+            }
         }
         if (!cx.empty()) {
             // Aim at the middle of the sector. Medians, because a sector also holds a few far-away pieces.
@@ -356,9 +374,10 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_world(JNIEnv* env, j
         g.meshTextures = std::move(textures);
         g.hasPendingMesh = true;
         g.sectorShown = true;
+        (void)skipped;
         msg = name + "  (sector " + std::to_string(g.sector + 1) + " of " + std::to_string(g.sectors.size()) + ")\n" +
-              std::to_string(meshes.size()) + " static meshes, " + std::to_string(tris) + " triangles" +
-              (skipped ? ", " + std::to_string(skipped) + " meshes not decoded" : "") + "\n" + std::to_string(textureCount) + " textures" +
+              std::to_string(order.size()) + " pieces placed, " + std::to_string(tris) + " triangles" +
+              (missingPieces ? ", " + std::to_string(missingPieces) + " pieces not decoded" : "") + "\n" + std::to_string(textureCount) + " textures" +
               (missing ? ", " + std::to_string(missing) + " not found" : "") + ". Drag to turn, pinch to zoom.";
     } catch (const std::exception& e) {
         msg = std::string("ERROR ") + e.what();
@@ -382,7 +401,7 @@ JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_camera(JNIEnv*, jclass,
     std::lock_guard<std::mutex> l(g.lock);
     g.yaw += dyaw;
     g.pitch = std::clamp(g.pitch + dpitch, -1.45f, 1.45f);
-    g.distance = std::clamp(g.distance * zoom, 2.0f, 20000.0f);
+    g.distance = std::clamp(g.distance * zoom, 2.0f, 400000.0f);
 }
 
 JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_setSurface(JNIEnv* env, jclass, jobject surface) {

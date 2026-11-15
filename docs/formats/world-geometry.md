@@ -36,6 +36,20 @@ material, `slot << 24 | 0x101`, sampler state, 0, 0. In the materials examined, 
 1 a decal colour map, 3 the normal map and 4 the specular map. Textures are found by object id in the
 sector's own pack or in the shared pack `core.xpp`.
 
+**Placement.** Mesh positions are in the mesh's own coordinates. A static object (class `CID_SoData`,
+id 0x168 in the EU disc release) puts its meshes in place with three tables, each a pointer and a count:
+
+| Offset | Table | Entry |
+|---|---|---|
+| 0x90 | pieces | 10 bytes: u16 0, u16 transform index, u16 `flags << 13 | mesh index`, u16 name, s16 (unknown) |
+| 0x98 | transforms | 12 floats: a 3x4 row-major matrix, translation in the fourth column |
+| 0xA8 | meshes | the 0x60-byte records described above |
+
+A sector pack holds several static objects: one named `__merged_statics_geom` whose transforms are in the
+sector's coordinates, and others for larger structures. Applying the tables to sector `A1` assembles a
+coherent waterfront: a pier with a building, lamp posts, curved retaining walls and rocks (597 pieces;
+318 more refer to meshes that are not decoded, most of them records without vertex streams).
+
 **Verified** on sector `A1`: 199 records found, and in every one the highest index equals the vertex count
 minus one. Drawn untextured, the result is recognisable architecture (columns, a stepped plinth, a tower).
 
@@ -49,7 +63,7 @@ texture coordinates, 133 have a colour map, and all 53 textures they name were f
 sign (its face maps onto the whole sign texture) and by a rough software render of the sector.
 
 **Not known:** the format word and flags, the packed vectors, materials of other shader classes, and where
-placed copies of shared models (most buildings) are listed.
+records without vertex streams get their geometry, what the piece flags mean, and how sectors are positioned relative to each other.
 
 ## Compressed model geometry (characters, props, weapons)
 

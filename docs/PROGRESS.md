@@ -12,6 +12,7 @@ Last updated: 2026-11-15. Tested against the EU disc release (BCES00220).
 | Object model | Directory, class ids, object names and pointer fixups decoded: about 123,000 objects in 159 classes |
 | Android app | Run on a Galaxy S23: import works and textures display correctly |
 | Static world geometry | Sector meshes decode (positions, triangles, texture coordinates); 187 of 199 in sector A1. Vertex sizes are found by checks on the data, not yet read from the record |
+| Placement inside a sector | Piece and transform tables decoded; sector A1 assembles into a coherent waterfront |
 | Materials | Texture slots of the common material class; colour maps resolve to textures in the sector or the shared pack |
 | World viewer, untextured | Run on a Galaxy S23: geometry and camera work |
 | Rigid model geometry | Packed positions decode for rigid pieces (checked by eye on a weapon) |
@@ -23,13 +24,13 @@ Last updated: 2026-11-15. Tested against the EU disc release (BCES00220).
 | Area | State |
 |---|---|
 | Skinned model geometry | Bit-packed positions unpack into correct limb shapes, but the per-piece scale and offset are unknown |
-| World layout | Sector packs give their own static meshes only. Placed copies of shared models (most buildings) are not found yet |
+| World layout | How sectors are positioned relative to each other is not known yet |
 
 ## Built but not yet run on a device
 
 | Area | State |
 |---|---|
-| World viewer, textured | Draws a sector's static meshes with their colour maps |
+| World viewer, placed and textured | Draws a sector with every decoded piece in place and its colour map |
 
 ## Not started
 
@@ -51,7 +52,7 @@ None yet. No figure will be reported here until it has been measured on a device
 
 ## Next
 
-1. Run the textured world viewer on a device.
-2. Find how shared models are placed in a sector, to fill in the buildings.
-3. Several sectors at once, with culling and streaming.
+1. Run the placed, textured world viewer on a device.
+2. Records without vertex streams (about a third of the pieces in A1).
+3. Sector positions, then several sectors at once with culling and streaming.
 4. Solve the scale and offset of skinned pieces, to assemble a character.

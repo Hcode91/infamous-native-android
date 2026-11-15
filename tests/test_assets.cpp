@@ -230,7 +230,7 @@ int main() {
     // Static world mesh: one record with a 16-byte vertex (position + two extra halves), two triangles.
     {
         const uint32_t recAt = 0x100, vbAt = 0x200, ibAt = 0x300, matAt = 0x20, entAt = 0x60;
-        std::vector<uint8_t> r0(0x400, 0);
+        std::vector<uint8_t> r0(0x600, 0);
         auto put = [&](size_t o, uint32_t v) { r0[o] = uint8_t(v >> 24); r0[o + 1] = uint8_t(v >> 16); r0[o + 2] = uint8_t(v >> 8); r0[o + 3] = uint8_t(v); };
         auto putf = [&](size_t o, float f) { uint32_t u; memcpy(&u, &f, 4); put(o, u); };
         put(recAt, 77);                        // name
@@ -252,13 +252,22 @@ int main() {
             for (int c = 0; c < 3; c++) putf(vbAt + size_t(v) * 16 + size_t(c) * 4, verts[v][c]);
             put(vbAt + size_t(v) * 16 + 12, 0x3C003C00);   // would be far outside the box if read as a position
         }
+        // a static object that places the mesh once, moved 100 units along x
+        const uint32_t objAt = 0x400, piecesAt = 0x4C0, matsAt = 0x4D0;
+        put(objAt, 0x168); put(objAt + 12, 9);
+        put(objAt + 0x90, piecesAt); put(objAt + 0x94, 1);
+        put(objAt + 0x98, matsAt); put(objAt + 0x9C, 1);
+        put(objAt + 0xA8, recAt); put(objAt + 0xAC, 1);
+        const float mat[12] = {1, 0, 0, 100, 0, 1, 0, 0, 0, 0, 1, 0};
+        for (int i = 0; i < 12; i++) putf(matsAt + size_t(i) * 4, mat[i]);
         const uint16_t idx[6] = {0, 1, 2, 0, 2, 3};
         for (int i = 0; i < 6; i++) { r0[ibAt + size_t(i) * 2] = uint8_t(idx[i] >> 8); r0[ibAt + size_t(i) * 2 + 1] = uint8_t(idx[i]); }
         auto w = [](uint32_t off) { return uint16_t(off / 4); };
         const std::vector<uint8_t> fix = makeFixups({0xC000, w(matAt + 32), w(entAt + 8), w(entAt + 36), w(recAt + 8), w(recAt + 0x34),
-                                                     w(recAt + 0x38), w(recAt + 0x4C), w(recAt + 0x50)});
+                                                     w(recAt + 0x38), w(recAt + 0x4C), w(recAt + 0x50), w(objAt + 0x90), w(objAt + 0x98),
+                                                     w(objAt + 0xA8)});
         std::vector<uint8_t> dir;
-        be32(dir, 0); be32(dir, 0);
+        be32(dir, 1); be32(dir, 1); be32(dir, objAt);
         const std::vector<uint8_t> file = makePackFromSegments({{1, 0x10, r0}, {6, 4, dir}, {2, 4, fix}});
         Pack p(file);
         size_t skipped = 99;
@@ -273,6 +282,10 @@ int main() {
             CHECK(m.uvs.size() == 8 && m.uvs[0] == 1.0f && m.uvs[7] == 1.0f);   // half 0x3C00 is 1.0
             CHECK(m.colorTextureOid == 444);
         }
+        size_t missingPieces = 99;
+        const auto inst = readMeshInstances(p, meshes, &missingPieces);
+        CHECK(inst.size() == 1 && missingPieces == 0);
+        if (inst.size() == 1) CHECK(inst[0].mesh == 0 && inst[0].objectOid == 9 && inst[0].flags == 0 && inst[0].matrix[3] == 100.0f);
         const auto slots = readMaterialTextures(p, matAt);
         CHECK(slots.size() == 2 && slots[0].first == 3 && slots[0].second == 555);
         {

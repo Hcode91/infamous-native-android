@@ -113,21 +113,35 @@ int main(int argc, char** argv) {
             Pack p(bytes);
             size_t skipped = 0, tris = 0, verts = 0, withUv = 0, withTex = 0;
             const auto meshes = readStaticMeshes(p, &skipped);
-            FILE* obj = argc > 4 ? fopen(argv[4], "w") : nullptr;
-            size_t base = 1;
             for (const auto& m : meshes) {
                 tris += m.indices.size() / 3;
                 verts += m.positions.size() / 3;
                 withUv += !m.uvs.empty();
                 withTex += m.colorTextureOid != 0;
+            }
+            size_t missingPieces = 0, placedTris = 0;
+            const auto instances = readMeshInstances(p, meshes, &missingPieces);
+            // The OBJ file holds the assembled pack: every ordinary piece, transformed into place.
+            FILE* obj = argc > 4 ? fopen(argv[4], "w") : nullptr;
+            size_t base = 1;
+            for (const auto& in : instances) {
+                if (in.flags != 0) continue;
+                const StaticMesh& m = meshes[in.mesh];
+                placedTris += m.indices.size() / 3;
                 if (!obj) continue;
-                for (size_t v = 0; v < m.positions.size(); v += 3)
-                    fprintf(obj, "v %g %g %g\n", m.positions[v], m.positions[v + 1], m.positions[v + 2]);
-                for (size_t t = 0; t < m.indices.size(); t += 3)
-                    fprintf(obj, "f %zu %zu %zu\n", base + m.indices[t], base + m.indices[t + 1], base + m.indices[t + 2]);
+                const auto& t = in.matrix;
+                for (size_t v = 0; v < m.positions.size(); v += 3) {
+                    const float x = m.positions[v], y = m.positions[v + 1], z = m.positions[v + 2];
+                    fprintf(obj, "v %g %g %g\n", t[0] * x + t[1] * y + t[2] * z + t[3], t[4] * x + t[5] * y + t[6] * z + t[7],
+                            t[8] * x + t[9] * y + t[10] * z + t[11]);
+                }
+                for (size_t k = 0; k < m.indices.size(); k += 3)
+                    fprintf(obj, "f %zu %zu %zu\n", base + m.indices[k], base + m.indices[k + 1], base + m.indices[k + 2]);
                 base += m.positions.size() / 3;
             }
             if (obj) fclose(obj);
+            printf("%zu placed pieces (%zu more use meshes that were not decoded), %zu triangles once placed\n", instances.size(),
+                   missingPieces, placedTris);
             printf("%zu objects, %zu pointer words, %zu static meshes (%zu skipped), %zu triangles, %zu vertices\n",
                    p.objects().size(), p.pointerOffsets().size(), meshes.size(), skipped, tris, verts);
             printf("%zu meshes with texture coordinates, %zu with a colour texture\n", withUv, withTex);
