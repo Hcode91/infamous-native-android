@@ -1,4 +1,5 @@
 // Unit tests with synthetic data only: no game files are needed or used.
+#include "assets/collision.h"
 #include "assets/hex_map.h"
 #include "assets/pack.h"
 #include "assets/psarc.h"
@@ -509,6 +510,22 @@ int main() {
         plan = layout.plan(60000, 0, 13000.0f);    // outside the city: nothing
         CHECK(plan.empty());
         CHECK(layout.cell("a3") && layout.cell("a3")->center[1] == 12124.0f && !layout.cell("zz"));
+    }
+    // Ground grid: two triangles of a ramp and a roof over part of it.
+    {
+        CollisionMesh m;
+        m.positions = {0, 0, 0, 100, 0, 100, 100, 100, 100, 0, 100, 0,   // ramp rising along x
+                       0, 0, 500, 50, 0, 500, 0, 50, 500};                  // roof
+        m.triangles = {0, 1, 2, 0, 2, 3, 4, 5, 6};
+        GroundGrid g(30.0f);
+        const float off[3] = {1000, 0, 0};
+        g.add(m, off);
+        float z = -1;
+        CHECK(g.heightAt(1050, 80, 400, &z) && std::fabs(z - 50) < 0.01f);    // on the ramp
+        CHECK(g.heightAt(1010, 10, 1000, &z) && std::fabs(z - 500) < 0.01f);  // the roof is the highest
+        CHECK(g.heightAt(1010, 10, 400, &z) && std::fabs(z - 10) < 0.01f);    // below the roof: the ramp
+        CHECK(!g.heightAt(50, 50, 1000, &z));                                 // outside
+        CHECK(g.triangleCount() == 3);
     }
     (void)bef;
     printf(failures ? "%d FAILED\n" : "all tests passed\n", failures);

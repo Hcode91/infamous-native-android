@@ -4,6 +4,7 @@
 //   ina_tool textures <archive.psarc_s> <pack name> <out dir> [oid_manifest.txt]
 //   ina_tool meshes <archive.psarc_s> <pack name> [out.obj] [archive holding core.xpp] [oid_manifest.txt]   a sector, assembled
 //   ina_tool city <archive holding EMPIRE.xpp> [out.obj] [oid_manifest.txt]             the far-away city and its hex cells
+#include "assets/collision.h"
 #include "assets/hex_map.h"
 #include "assets/pack.h"
 #include "assets/psarc.h"
@@ -258,6 +259,45 @@ int main(int argc, char** argv) {
                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count());
             }
             printf("in all: %zu triangles, %zu textures (%.1f MB as RGBA8)\n", totalTris, totalTex, double(texBytes) / 1048576.0);
+            return 0;
+        }
+        if (cmd == "collision" && argc >= 4) {
+            // ina_tool collision <archive> <pack> [out.obj] [x y]: the collision of a pack, optionally a height query
+            const int idx = arc.find(argv[3]);
+            if (idx < 0) {
+                fprintf(stderr, "no pack named %s\n", argv[3]);
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            const auto objs = readCollision(p);
+            GroundGrid ground;
+            const float zero[3] = {0, 0, 0};
+            FILE* obj = argc > 4 ? fopen(argv[4], "w") : nullptr;
+            size_t base = 1;
+            for (const CollisionObject& o : objs) {
+                size_t tris = 0, verts = 0;
+                for (const CollisionMesh& m : o.meshes) {
+                    tris += m.triangles.size() / 3;
+                    verts += m.positions.size() / 3;
+                    if (o.sectorWide) ground.add(m, zero);
+                    if (obj && o.sectorWide) {
+                        for (size_t v = 0; v + 2 < m.positions.size(); v += 3) fprintf(obj, "v %g %g %g\n", m.positions[v], m.positions[v + 1], m.positions[v + 2]);
+                        for (size_t t = 0; t + 2 < m.triangles.size(); t += 3)
+                            fprintf(obj, "f %zu %zu %zu\n", base + m.triangles[t], base + m.triangles[t + 1], base + m.triangles[t + 2]);
+                        base += m.positions.size() / 3;
+                    }
+                }
+                printf("object at %x: %s, %zu meshes, %zu vertices, %zu triangles\n", o.objectOffset, o.sectorWide ? "sector-wide" : "prop",
+                       o.meshes.size(), verts, tris);
+            }
+            if (obj) fclose(obj);
+            if (argc > 6) {
+                float z = 0;
+                const float x = float(atof(argv[5])), y = float(atof(argv[6]));
+                if (ground.heightAt(x, y, 1e9f, &z)) printf("highest surface at %.0f %.0f: %.1f\n", x, y, z);
+                else printf("no surface at %.0f %.0f\n", x, y);
+            }
             return 0;
         }
         fprintf(stderr, "unknown command\n");

@@ -19,6 +19,7 @@
 #include <thread>
 #include <vector>
 
+#include "assets/collision.h"
 #include "assets/hex_map.h"
 #include "assets/pack.h"
 #include "assets/psarc.h"
@@ -77,6 +78,8 @@ struct State {
     float target[3] = {0, 0, 0};
     float yaw = 0.7f, pitch = 0.45f, distance = 200.0f;
     std::string here;                        // the sector the target is in
+    std::shared_ptr<GroundGrid> ground;      // collision of the sector held at full detail
+    std::string groundSector;
     std::string loaderNote;                  // what the loader is doing
 
     // loader thread -> render thread
@@ -366,6 +369,18 @@ void loaderLoop() {
                     const HexCell* cell = g.layout->cell(w.sector);
                     const float zero[3] = {0, 0, 0};
                     j.chunks = buildSectorChunks(p, g.shared.get(), &g.names, w.level, cell ? cell->center : zero, 3);
+                    if (w.level == 0) {
+                        // the sector's collision, for keeping the camera on the ground
+                        auto ground = std::make_shared<GroundGrid>();
+                        for (const CollisionObject& co : readCollision(p))
+                            if (co.sectorWide)
+                                for (const CollisionMesh& m : co.meshes) ground->add(m, cell ? cell->center : zero);
+                        float gz = 0;
+                        std::lock_guard<std::mutex> l(g.lock);
+                        g.ground = ground;
+                        g.groundSector = w.sector;
+                        if (ground->heightAt(g.target[0], g.target[1], g.target[2] + 5000.0f, &gz)) g.target[2] = gz;
+                    }
                     const auto own = textureIndex(p);
                     std::set<uint64_t> have;
                     {
@@ -466,6 +481,7 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_open(JNIEnv* env, jc
         g.coreBytes.clear();
         g.city.reset();
         g.layout.reset();
+        g.ground.reset();
         g.farChunks.clear();
         g.held.clear();
         g.jobs.clear();
@@ -651,6 +667,9 @@ JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_pan(JNIEnv*, jclass, jf
     const float rx = fy, ry = -fx;
     g.target[0] += (rx * -dx + fx * dy) * scale;
     g.target[1] += (ry * -dx + fy * dy) * scale;
+    // Follow the ground: the highest surface no more than a storey above the current height.
+    float z = 0;
+    if (g.ground && !g.overview && g.ground->heightAt(g.target[0], g.target[1], g.target[2] + 300.0f, &z)) g.target[2] = z;
 }
 
 JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_setSurface(JNIEnv* env, jclass, jobject surface) {
