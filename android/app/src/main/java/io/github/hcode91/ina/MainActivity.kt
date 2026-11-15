@@ -9,6 +9,8 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.DocumentsContract
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
@@ -34,6 +36,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var importButton: Button
     private lateinit var controls: LinearLayout
     private var opened = false
+    private var worldMode = false
+    private lateinit var modeButton: Button
+    private var lastX = 0f
+    private var lastY = 0f
 
     private val gameDir: File get() = File(filesDir, "game")
 
@@ -60,17 +66,52 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
         root.addView(stats, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.END))
 
+        // World view gestures: one finger turns the camera, two fingers zoom.
+        val pinch = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(d: ScaleGestureDetector): Boolean {
+                if (worldMode && d.scaleFactor > 0f) Native.camera(0f, 0f, 1f / d.scaleFactor)
+                return true
+            }
+        })
+        surface.setOnTouchListener { v, e ->
+            pinch.onTouchEvent(e)
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { lastX = e.x; lastY = e.y }
+                MotionEvent.ACTION_MOVE -> if (worldMode && e.pointerCount == 1 && !pinch.isInProgress) {
+                    Native.camera(-(e.x - lastX) * 0.006f, (e.y - lastY) * 0.006f, 1f)
+                    lastX = e.x; lastY = e.y
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    // carry on from the finger that stays down, so the view does not jump
+                    val keep = if (e.actionIndex == 0) 1 else 0
+                    if (keep < e.pointerCount) { lastX = e.getX(keep); lastY = e.getY(keep) }
+                }
+                MotionEvent.ACTION_UP -> v.performClick()
+            }
+            true
+        }
+
         controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun add(label: String, packs: Int, textures: Int) {
             controls.addView(Button(this).apply {
                 text = label
-                setOnClickListener { step(packs, textures) }
+                setOnClickListener { if (worldMode) { if (packs != 0) showWorld(packs) } else step(packs, textures) }
             })
         }
         add("◀ Pack", -1, 0)
         add("◀ Texture", 0, -1)
         add("Texture ▶", 0, 1)
         add("Pack ▶", 1, 0)
+        modeButton = Button(this).apply {
+            text = "World"
+            setOnClickListener {
+                if (!opened) return@setOnClickListener
+                worldMode = !worldMode
+                text = if (worldMode) "Textures" else "World"
+                if (worldMode) showWorld(0) else { Native.hideWorld(); step(0, 0) }
+            }
+        }
+        controls.addView(modeButton)
         controls.visibility = View.GONE
         root.addView(controls, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
 
@@ -196,6 +237,15 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                     info.text = "The imported files could not be opened: $result\nChoose the game folder again to re-import."
                 }
             }
+        }
+    }
+
+    private fun showWorld(delta: Int) {
+        if (!opened) return
+        info.text = "Loading sector…"
+        thread {
+            val text = Native.world(delta)
+            ui.post { info.text = text }
         }
     }
 

@@ -2,9 +2,11 @@
 //   ina_tool list <archive.psarc_s>
 //   ina_tool packs <archive.psarc_s>                    summary of every pack
 //   ina_tool textures <archive.psarc_s> <pack name> <out dir> [oid_manifest.txt]
+//   ina_tool meshes <archive.psarc_s> <pack name> [out.obj]   static world geometry
 #include "assets/pack.h"
 #include "assets/psarc.h"
 #include "assets/texture.h"
+#include "assets/world_mesh.h"
 #include "core/bytes.h"
 #include "core/png.h"
 
@@ -99,6 +101,33 @@ int main(int argc, char** argv) {
                 n++;
             }
             printf("%d textures written\n", n);
+            return 0;
+        }
+        if (cmd == "meshes" && argc >= 4) {   // ina_tool meshes <archive> <pack> [out.obj]
+            const int idx = arc.find(argv[3]);
+            if (idx < 0) {
+                fprintf(stderr, "no pack named %s\n", argv[3]);
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            size_t skipped = 0, tris = 0, verts = 0;
+            const auto meshes = readStaticMeshes(p, &skipped);
+            FILE* obj = argc > 4 ? fopen(argv[4], "w") : nullptr;
+            size_t base = 1;
+            for (const auto& m : meshes) {
+                tris += m.indices.size() / 3;
+                verts += m.positions.size() / 3;
+                if (!obj) continue;
+                for (size_t v = 0; v < m.positions.size(); v += 3)
+                    fprintf(obj, "v %g %g %g\n", m.positions[v], m.positions[v + 1], m.positions[v + 2]);
+                for (size_t t = 0; t < m.indices.size(); t += 3)
+                    fprintf(obj, "f %zu %zu %zu\n", base + m.indices[t], base + m.indices[t + 1], base + m.indices[t + 2]);
+                base += m.positions.size() / 3;
+            }
+            if (obj) fclose(obj);
+            printf("%zu objects, %zu pointer words, %zu static meshes (%zu skipped), %zu triangles, %zu vertices\n",
+                   p.objects().size(), p.pointerOffsets().size(), meshes.size(), skipped, tris, verts);
             return 0;
         }
         fprintf(stderr, "unknown command\n");

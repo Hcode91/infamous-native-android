@@ -92,19 +92,15 @@ The segment is a list of tagged chunks: `ILNK`, optionally `SPLP`, then `END `. 
 - A pointer's value is an offset into the data area and lands inside the list's target region. Checked
   on three packs of different sizes: every pointer in lists 0 and 1 lands in its region.
 
-**Geometry** (partly understood)
+**Geometry**
 
-Model geometry is in segment kind 11. It is stored as PlayStation Edge geometry segments: each has a
-descriptor in an object segment holding a vertex count, an index count, a pointer to 16-bit indexes and
-pointers to several vertex streams. One stream is 10 bytes per vertex: 4 bytes of colour and three
-half-floats.
+See [world-geometry.md](world-geometry.md).
 
 ## Not yet known
 
 - The remaining header fields (0x08-0x2B) and the tables between the segment table and the data area.
 - The `SPLP` chunk and the lists that target the fixup region (probably references to objects in other
   packs).
-- The exact layout of the geometry descriptor, the vertex stream formats, and where positions are stored.
 - The layout of every other object class: materials, skeletons, animations, collision, world sectors,
   scripts.
 - The cube map face order.

@@ -2,6 +2,7 @@
 #include "assets/pack.h"
 #include "assets/psarc.h"
 #include "assets/texture.h"
+#include "assets/world_mesh.h"
 #include "core/bytes.h"
 
 #include <zlib.h>
@@ -89,6 +90,50 @@ static std::vector<uint8_t> makePack(uint32_t w, uint32_t h, uint32_t mips, uint
     return d;
 }
 
+// Builds a PACK from whole segments: (kind, alignment, bytes). All segments go in region 0 except the last,
+// which is the fixup segment and gets a region of its own, as in the game's packs.
+struct Seg {
+    uint8_t kind, align;
+    std::vector<uint8_t> bytes;
+};
+static std::vector<uint8_t> makePackFromSegments(const std::vector<Seg>& segs) {
+    std::vector<uint8_t> d(0x70, 0);
+    memcpy(d.data(), "PACK", 4);
+    d[5] = 8; d[7] = 0x70;
+    uint32_t total = 0, region0 = 0;
+    for (size_t i = 0; i < segs.size(); i++) {
+        if (i + 1 == segs.size()) region0 = total;
+        total += uint32_t(segs[i].bytes.size());
+    }
+    std::vector<uint8_t> t;
+    be32(t, 0); be32(t, 2); be32(t, 0); be32(t, uint32_t(segs.size())); be32(t, 0); be32(t, 1);
+    be32(t, 0xFF00); be32(t, region0); be32(t, 0); be32(t, 0); be32(t, 0); be32(t, 0); be32(t, uint32_t(segs.size() - 1));
+    be32(t, 0xFF02); be32(t, total - region0); be32(t, region0); be32(t, 0); be32(t, 0); be32(t, uint32_t(segs.size() - 1)); be32(t, 1);
+    uint32_t off = 0;
+    for (const Seg& sg : segs) {
+        be32(t, uint32_t(sg.kind) << 24 | uint32_t(sg.align) << 16); be32(t, uint32_t(sg.bytes.size())); be32(t, off); be32(t, 0);
+        off += uint32_t(sg.bytes.size());
+    }
+    d.insert(d.end(), t.begin(), t.end());
+    d[0x2C] = uint8_t(total >> 24); d[0x2D] = uint8_t(total >> 16); d[0x2E] = uint8_t(total >> 8); d[0x2F] = uint8_t(total);
+    for (const Seg& sg : segs) d.insert(d.end(), sg.bytes.begin(), sg.bytes.end());
+    return d;
+}
+static void bef(std::vector<uint8_t>& v, float f) {
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    be32(v, u);
+}
+// An ILNK chunk with one list of 16-bit codes.
+static std::vector<uint8_t> makeFixups(const std::vector<uint16_t>& codes) {
+    std::vector<uint8_t> f = {'I', 'L', 'N', 'K'};
+    be32(f, 0); be32(f, 1); be32(f, 0); be32(f, uint32_t(codes.size()));
+    for (uint16_t c : codes) { f.push_back(uint8_t(c >> 8)); f.push_back(uint8_t(c)); }
+    while (f.size() % 4) f.push_back(0);
+    f.insert(f.end(), {'E', 'N', 'D', ' ', 0, 0, 0, 0});
+    return f;
+}
+
 int main() {
     // PSARC: a compressed entry, a raw entry, lookup by name.
     std::vector<uint8_t> big(100000);
@@ -167,6 +212,62 @@ int main() {
         try { Pack bad(bogus); } catch (const FormatError&) { threw = true; }
         CHECK(threw);
     }
+    // Fixups: plain indexes, a run, and a high-part code; plus the object directory.
+    {
+        std::vector<uint8_t> objects(0x9000 * 4, 0);            // region 0: 0x9000 words
+        std::vector<uint8_t> dir;
+        be32(dir, 2); be32(dir, 2); be32(dir, 0x10); be32(dir, 0x40);
+        // words 1 and 5; a run of 3 starting at word 8; then word (1 << 15) + 2
+        const std::vector<uint8_t> fix = makeFixups({0xC000, 0x0001, 0x0005, 0x0008, 0x8003, 0xC001, 0x0002});
+        const std::vector<uint8_t> file = makePackFromSegments({{1, 0x10, objects}, {6, 4, dir}, {2, 4, fix}});
+        Pack p(file);
+        CHECK(p.isPointer(4) && p.isPointer(20) && !p.isPointer(0) && !p.isPointer(6));
+        CHECK(p.isPointer(32) && p.isPointer(36) && p.isPointer(40) && !p.isPointer(44));
+        CHECK(p.isPointer(((1u << 15) + 2) * 4) && !p.isPointer(((1u << 15) + 3) * 4));
+        CHECK(p.pointerOffsets().size() == 6);
+        CHECK(p.objects().size() == 2 && p.objects()[1] == 0x40);
+    }
+    // Static world mesh: one record with a 16-byte vertex (position + two extra halves), two triangles.
+    {
+        const uint32_t recAt = 0x100, vbAt = 0x200, ibAt = 0x300, matAt = 0x20;
+        std::vector<uint8_t> r0(0x400, 0);
+        auto put = [&](size_t o, uint32_t v) { r0[o] = uint8_t(v >> 24); r0[o + 1] = uint8_t(v >> 16); r0[o + 2] = uint8_t(v >> 8); r0[o + 3] = uint8_t(v); };
+        auto putf = [&](size_t o, float f) { uint32_t u; memcpy(&u, &f, 4); put(o, u); };
+        put(recAt, 77);                        // name
+        put(recAt + 4, 2u << 16 | 3);          // two triangles
+        put(recAt + 8, matAt);
+        const float box[6] = {0, 0, 0, 10, 20, 30};
+        for (int i = 0; i < 6; i++) putf(recAt + 0x10 + size_t(i) * 4, box[i]);
+        put(recAt + 0x34, vbAt); put(recAt + 0x38, vbAt);
+        put(recAt + 0x3C, 0); put(recAt + 0x40, 0xFFFFFFFF);
+        put(recAt + 0x44, 0); put(recAt + 0x48, 0xFFFFFFFF);
+        put(recAt + 0x4C, ibAt); put(recAt + 0x50, ibAt);
+        put(recAt + 0x54, 4);                  // four vertices
+        const float verts[4][3] = {{0, 0, 0}, {10, 0, 0}, {10, 20, 30}, {0, 20, 30}};
+        for (int v = 0; v < 4; v++) {
+            for (int c = 0; c < 3; c++) putf(vbAt + size_t(v) * 16 + size_t(c) * 4, verts[v][c]);
+            put(vbAt + size_t(v) * 16 + 12, 0x3C003C00);   // would be far outside the box if read as a position
+        }
+        const uint16_t idx[6] = {0, 1, 2, 0, 2, 3};
+        for (int i = 0; i < 6; i++) { r0[ibAt + size_t(i) * 2] = uint8_t(idx[i] >> 8); r0[ibAt + size_t(i) * 2 + 1] = uint8_t(idx[i]); }
+        auto w = [](uint32_t off) { return uint16_t(off / 4); };
+        const std::vector<uint8_t> fix = makeFixups({0xC000, w(recAt + 8), w(recAt + 0x34), w(recAt + 0x38), w(recAt + 0x4C), w(recAt + 0x50)});
+        std::vector<uint8_t> dir;
+        be32(dir, 0); be32(dir, 0);
+        const std::vector<uint8_t> file = makePackFromSegments({{1, 0x10, r0}, {6, 4, dir}, {2, 4, fix}});
+        Pack p(file);
+        size_t skipped = 99;
+        const auto meshes = readStaticMeshes(p, &skipped);
+        CHECK(meshes.size() == 1 && skipped == 0);
+        if (meshes.size() == 1) {
+            const StaticMesh& m = meshes[0];
+            CHECK(m.nameOid == 77 && m.materialOffset == matAt && m.vertexStride == 16);
+            CHECK(m.positions.size() == 12 && m.positions[3] == 10.0f && m.positions[8] == 30.0f);
+            CHECK(m.indices.size() == 6 && m.indices[5] == 3);
+            CHECK(m.boxMax[1] == 20.0f);
+        }
+    }
+    (void)bef;
     printf(failures ? "%d FAILED\n" : "all tests passed\n", failures);
     return failures ? 1 : 0;
 }

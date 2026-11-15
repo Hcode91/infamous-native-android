@@ -9,7 +9,8 @@ namespace ina {
 
 enum class SegmentKind : uint8_t {
     Object = 1,        // serialized engine objects
-    Fixups = 2,        // relocation data (layout not decoded yet)
+    Fixups = 2,        // pointer fixups: which words of region 0 are pointers
+    Directory = 6,     // object directory
     Texture = 3,       // 0x70-byte texture descriptors
     BulkGpu = 13,      // texture pixel data
     Shader = 14,
@@ -55,10 +56,26 @@ public:
     std::span<const uint8_t> segment(size_t i) const;
     std::vector<TextureInfo> textures() const;
 
+    // Big-endian word at a data-area offset (throws when out of range).
+    uint32_t word(size_t offset) const;
+    // True when the 32-bit word at this data-area offset is a pointer according to the fixup table.
+    bool isPointer(size_t offset) const {
+        const size_t w = offset / 4;
+        return (offset & 3) == 0 && w < pointerWords_.size() && pointerWords_[w];
+    }
+    // Offsets of the pack's objects, from the object directory (empty when the pack has none).
+    const std::vector<uint32_t>& objects() const { return objects_; }
+    // All pointer words, ascending, as data-area offsets.
+    std::vector<uint32_t> pointerOffsets() const;
+
 private:
+    void readFixups();
+    void readDirectory();
     std::span<const uint8_t> file_, data_;
     std::vector<PackRegion> regions_;
     std::vector<PackSegment> segments_;
+    std::vector<bool> pointerWords_;   // one flag per word of region 0
+    std::vector<uint32_t> objects_;
 };
 
 }  // namespace ina

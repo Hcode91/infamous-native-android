@@ -10,6 +10,7 @@ add_library(ina_core STATIC
     engine/assets/psarc.cpp
     engine/assets/pack.cpp
     engine/assets/texture.cpp
+    engine/assets/world_mesh.cpp
     engine/core/png.cpp)
 target_include_directories(ina_core PUBLIC engine)
 target_compile_options(ina_core PRIVATE -Wall -Wextra)
@@ -22,16 +23,18 @@ if(ANDROID)
     set(SPV_DIR "${CMAKE_CURRENT_BINARY_DIR}/spv")
     file(MAKE_DIRECTORY "${SPV_DIR}")
     set(SPV_HEADERS "")
-    foreach(stage vert frag)
-        set(src "${CMAKE_CURRENT_SOURCE_DIR}/engine/render/shaders/quad.${stage}")
-        set(spv "${SPV_DIR}/quad_${stage}.spv")
-        set(hdr "${SPV_DIR}/quad_${stage}_spv.h")
-        add_custom_command(OUTPUT "${hdr}"
-            COMMAND "${GLSLC}" -O "${src}" -o "${spv}"
-            COMMAND "${CMAKE_COMMAND}" -DIN=${spv} -DOUT=${hdr} -DNAME=quad_${stage}_spv -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/spirv_header.cmake"
-            DEPENDS "${src}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/spirv_header.cmake"
-            VERBATIM)
-        list(APPEND SPV_HEADERS "${hdr}")
+    foreach(shader quad mesh)
+        foreach(stage vert frag)
+            set(src "${CMAKE_CURRENT_SOURCE_DIR}/engine/render/shaders/${shader}.${stage}")
+            set(spv "${SPV_DIR}/${shader}_${stage}.spv")
+            set(hdr "${SPV_DIR}/${shader}_${stage}_spv.h")
+            add_custom_command(OUTPUT "${hdr}"
+                COMMAND "${GLSLC}" -O "${src}" -o "${spv}"
+                COMMAND "${CMAKE_COMMAND}" -DIN=${spv} -DOUT=${hdr} -DNAME=${shader}_${stage}_spv -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/spirv_header.cmake"
+                DEPENDS "${src}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/spirv_header.cmake"
+                VERBATIM)
+            list(APPEND SPV_HEADERS "${hdr}")
+        endforeach()
     endforeach()
     add_library(ina SHARED
         engine/render/vk_renderer.cpp

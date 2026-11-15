@@ -10,6 +10,10 @@
 
 #include "quad_frag_spv.h"
 #include "quad_vert_spv.h"
+#include "mesh_frag_spv.h"
+#include "mesh_vert_spv.h"
+
+#include <cmath>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "ina", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "ina", __VA_ARGS__)
@@ -137,19 +141,35 @@ bool VkRenderer::init(ANativeWindow* window) {
     att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     att.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    // Depth: 32-bit float where the device can use it as an attachment, else 16-bit (always available).
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(gpu_, VK_FORMAT_D32_SFLOAT, &fp);
+    depthFormat_ = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_D16_UNORM;
+    VkAttachmentDescription datt{};
+    datt.format = depthFormat_;
+    datt.samples = VK_SAMPLE_COUNT_1_BIT;
+    datt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    datt.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    datt.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    datt.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    datt.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    datt.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference dref{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    const VkAttachmentDescription atts[2] = {att, datt};
     VkSubpassDescription sub{};
     sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     sub.colorAttachmentCount = 1;
     sub.pColorAttachments = &ref;
+    sub.pDepthStencilAttachment = &dref;
     VkSubpassDependency dep{};
     dep.srcSubpass = VK_SUBPASS_EXTERNAL;
     dep.dstSubpass = 0;
-    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     VkRenderPassCreateInfo rpi{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    rpi.attachmentCount = 1;
-    rpi.pAttachments = &att;
+    rpi.attachmentCount = 2;
+    rpi.pAttachments = atts;
     rpi.subpassCount = 1;
     rpi.pSubpasses = &sub;
     rpi.dependencyCount = 1;
@@ -224,12 +244,48 @@ bool VkRenderer::init(ANativeWindow* window) {
     gpi.pMultisampleState = &ms;
     gpi.pColorBlendState = &cb;
     gpi.pDynamicState = &dyn;
+    VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    gpi.pDepthStencilState = &ds;   // the image quad ignores depth
     gpi.layout = layout_;
     gpi.renderPass = pass_;
     r = vkCreateGraphicsPipelines(dev_, VK_NULL_HANDLE, 1, &gpi, nullptr, &pipeline_);
     vkDestroyShaderModule(dev_, vs, nullptr);
     vkDestroyShaderModule(dev_, fs, nullptr);
     if (r != VK_SUCCESS) return fail("vkCreateGraphicsPipelines", r);
+
+    // Mesh pipeline: position + normal vertices, one matrix as a push constant, depth tested, two-sided.
+    VkPushConstantRange mpc{VK_SHADER_STAGE_VERTEX_BIT, 0, 64};
+    VkPipelineLayoutCreateInfo mli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    mli.pushConstantRangeCount = 1;
+    mli.pPushConstantRanges = &mpc;
+    if ((r = vkCreatePipelineLayout(dev_, &mli, nullptr, &meshLayout_)) != VK_SUCCESS) return fail("mesh pipeline layout", r);
+    smi.codeSize = sizeof(mesh_vert_spv);
+    smi.pCode = mesh_vert_spv;
+    if ((r = vkCreateShaderModule(dev_, &smi, nullptr, &vs)) != VK_SUCCESS) return fail("mesh vertex shader", r);
+    smi.codeSize = sizeof(mesh_frag_spv);
+    smi.pCode = mesh_frag_spv;
+    if ((r = vkCreateShaderModule(dev_, &smi, nullptr, &fs)) != VK_SUCCESS) {
+        vkDestroyShaderModule(dev_, vs, nullptr);
+        return fail("mesh fragment shader", r);
+    }
+    stages[0].module = vs;
+    stages[1].module = fs;
+    const VkVertexInputBindingDescription vbind{0, 24, VK_VERTEX_INPUT_RATE_VERTEX};
+    const VkVertexInputAttributeDescription vattr[2] = {{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12}};
+    VkPipelineVertexInputStateCreateInfo mvi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    mvi.vertexBindingDescriptionCount = 1;
+    mvi.pVertexBindingDescriptions = &vbind;
+    mvi.vertexAttributeDescriptionCount = 2;
+    mvi.pVertexAttributeDescriptions = vattr;
+    ds.depthTestEnable = VK_TRUE;
+    ds.depthWriteEnable = VK_TRUE;
+    gpi.pVertexInputState = &mvi;
+    gpi.layout = meshLayout_;
+    r = vkCreateGraphicsPipelines(dev_, VK_NULL_HANDLE, 1, &gpi, nullptr, &meshPipeline_);
+    vkDestroyShaderModule(dev_, vs, nullptr);
+    vkDestroyShaderModule(dev_, fs, nullptr);
+    if (r != VK_SUCCESS) return fail("mesh pipeline", r);
 
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -290,6 +346,31 @@ bool VkRenderer::createSwapchain() {
     sci.clipped = VK_TRUE;
     if ((r = vkCreateSwapchainKHR(dev_, &sci, nullptr, &swapchain_)) != VK_SUCCESS) return fail("vkCreateSwapchainKHR", r);
 
+    VkImageCreateInfo dici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    dici.imageType = VK_IMAGE_TYPE_2D;
+    dici.format = depthFormat_;
+    dici.extent = {extent_.width, extent_.height, 1};
+    dici.mipLevels = 1;
+    dici.arrayLayers = 1;
+    dici.samples = VK_SAMPLE_COUNT_1_BIT;
+    dici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    dici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if ((r = vkCreateImage(dev_, &dici, nullptr, &depth_)) != VK_SUCCESS) return fail("depth image", r);
+    VkMemoryRequirements dmr;
+    vkGetImageMemoryRequirements(dev_, depth_, &dmr);
+    VkMemoryAllocateInfo dmai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    dmai.allocationSize = dmr.size;
+    dmai.memoryTypeIndex = memoryType(dmr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (dmai.memoryTypeIndex == UINT32_MAX || (r = vkAllocateMemory(dev_, &dmai, nullptr, &depthMem_)) != VK_SUCCESS)
+        return fail("depth memory", VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    vkBindImageMemory(dev_, depth_, depthMem_, 0);
+    VkImageViewCreateInfo dvci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    dvci.image = depth_;
+    dvci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    dvci.format = depthFormat_;
+    dvci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    if ((r = vkCreateImageView(dev_, &dvci, nullptr, &depthView_)) != VK_SUCCESS) return fail("depth view", r);
+
     uint32_t n = 0;
     vkGetSwapchainImagesKHR(dev_, swapchain_, &n, nullptr);
     std::vector<VkImage> images(n);
@@ -305,8 +386,9 @@ bool VkRenderer::createSwapchain() {
         views_.push_back(view);
         VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
         fci.renderPass = pass_;
-        fci.attachmentCount = 1;
-        fci.pAttachments = &view;
+        const VkImageView fbViews[2] = {view, depthView_};
+        fci.attachmentCount = 2;
+        fci.pAttachments = fbViews;
         fci.width = extent_.width;
         fci.height = extent_.height;
         fci.layers = 1;
@@ -325,8 +407,68 @@ void VkRenderer::destroySwapchain() {
     for (VkImageView v : views_) vkDestroyImageView(dev_, v, nullptr);
     framebuffers_.clear();
     views_.clear();
+    if (depthView_) vkDestroyImageView(dev_, depthView_, nullptr);
+    if (depth_) vkDestroyImage(dev_, depth_, nullptr);
+    if (depthMem_) vkFreeMemory(dev_, depthMem_, nullptr);
+    depthView_ = VK_NULL_HANDLE;
+    depth_ = VK_NULL_HANDLE;
+    depthMem_ = VK_NULL_HANDLE;
     if (swapchain_) vkDestroySwapchainKHR(dev_, swapchain_, nullptr);
     swapchain_ = VK_NULL_HANDLE;
+}
+
+void VkRenderer::destroyMesh() {
+    if (!dev_) return;
+    if (vbuf_) vkDestroyBuffer(dev_, vbuf_, nullptr);
+    if (ibuf_) vkDestroyBuffer(dev_, ibuf_, nullptr);
+    if (vmem_) vkFreeMemory(dev_, vmem_, nullptr);
+    if (imem_) vkFreeMemory(dev_, imem_, nullptr);
+    vbuf_ = ibuf_ = VK_NULL_HANDLE;
+    vmem_ = imem_ = VK_NULL_HANDLE;
+    indexCount_ = 0;
+}
+
+bool VkRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, const void* src, VkBuffer* buf, VkDeviceMemory* mem) {
+    VkResult r;
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = size;
+    bci.usage = usage;
+    if ((r = vkCreateBuffer(dev_, &bci, nullptr, buf)) != VK_SUCCESS) return fail("mesh buffer", r);
+    VkMemoryRequirements mr;
+    vkGetBufferMemoryRequirements(dev_, *buf, &mr);
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mai.allocationSize = mr.size;
+    // Host-visible memory keeps this simple; a staging copy into device-local memory can come with streaming.
+    mai.memoryTypeIndex = memoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (mai.memoryTypeIndex == UINT32_MAX || (r = vkAllocateMemory(dev_, &mai, nullptr, mem)) != VK_SUCCESS)
+        return fail("mesh memory", VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    vkBindBufferMemory(dev_, *buf, *mem, 0);
+    void* p = nullptr;
+    if ((r = vkMapMemory(dev_, *mem, 0, size, 0, &p)) != VK_SUCCESS) return fail("map mesh memory", r);
+    memcpy(p, src, size_t(size));
+    vkUnmapMemory(dev_, *mem);
+    return true;
+}
+
+bool VkRenderer::setMesh(const std::vector<float>& vertices, const std::vector<uint32_t>& indices) {
+    if (!dev_) return false;
+    vkDeviceWaitIdle(dev_);
+    destroyMesh();
+    if (vertices.empty() || indices.empty()) return true;
+    if (!createBuffer(vertices.size() * sizeof(float), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices.data(), &vbuf_, &vmem_) ||
+        !createBuffer(indices.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data(), &ibuf_, &imem_)) {
+        destroyMesh();
+        return false;
+    }
+    indexCount_ = uint32_t(indices.size());
+    return true;
+}
+
+void VkRenderer::setCamera(const float target[3], float yaw, float pitch, float distance) {
+    camTarget_[0] = target[0]; camTarget_[1] = target[1]; camTarget_[2] = target[2];
+    camYaw_ = yaw;
+    camPitch_ = pitch;
+    camDist_ = distance;
 }
 
 void VkRenderer::destroyTexture() {
@@ -460,28 +602,64 @@ bool VkRenderer::drawFrame() {
     vkResetCommandBuffer(cmd_, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkBeginCommandBuffer(cmd_, &bi);
-    VkClearValue clear{};
-    clear.color = {{0.05f, 0.05f, 0.07f, 1.0f}};
+    VkClearValue clear[2] = {};
+    if (indexCount_) clear[0].color = {{0.36f, 0.45f, 0.58f, 1.0f}};
+    else clear[0].color = {{0.05f, 0.05f, 0.07f, 1.0f}};
+    clear[1].depthStencil = {1.0f, 0};
     VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rbi.renderPass = pass_;
     rbi.framebuffer = framebuffers_[index];
     rbi.renderArea.extent = extent_;
-    rbi.clearValueCount = 1;
-    rbi.pClearValues = &clear;
+    rbi.clearValueCount = 2;
+    rbi.pClearValues = clear;
     vkCmdBeginRenderPass(cmd_, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     VkViewport vp{0, 0, float(extent_.width), float(extent_.height), 0, 1};
     VkRect2D sc{{0, 0}, extent_};
     vkCmdSetViewport(cmd_, 0, 1, &vp);
     vkCmdSetScissor(cmd_, 0, 1, &sc);
-    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
-    vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set_, 0, nullptr);
-    // Fit the image inside the screen with a small margin, keeping its shape.
     const float screen = float(extent_.width) / float(extent_.height);
-    const float image = texH_ ? float(texW_) / float(texH_) : 1.0f;
-    float scale[2] = {0.94f, 0.94f};
-    if (image > screen) scale[1] *= screen / image; else scale[0] *= image / screen;
-    vkCmdPushConstants(cmd_, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, 8, scale);
-    vkCmdDraw(cmd_, 3, 1, 0, 0);
+    if (indexCount_) {
+        // Orbit camera, Z up. Column-major matrices: clip = proj * view * world.
+        const float cp = std::cos(camPitch_), sp = std::sin(camPitch_);
+        const float eye[3] = {camTarget_[0] + camDist_ * cp * std::cos(camYaw_), camTarget_[1] + camDist_ * cp * std::sin(camYaw_),
+                              camTarget_[2] + camDist_ * sp};
+        float f[3] = {camTarget_[0] - eye[0], camTarget_[1] - eye[1], camTarget_[2] - eye[2]};
+        const float fl = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+        for (float& v : f) v /= fl;
+        float s[3] = {f[1], -f[0], 0.0f};   // forward x up(0,0,1)
+        const float sl = std::sqrt(s[0] * s[0] + s[1] * s[1]);
+        s[0] /= sl; s[1] /= sl;
+        const float u[3] = {s[1] * f[2] - s[2] * f[1], s[2] * f[0] - s[0] * f[2], s[0] * f[1] - s[1] * f[0]};
+        const float zn = std::max(0.05f, camDist_ * 0.01f), zf = camDist_ * 40.0f;
+        const float t = 1.0f / std::tan(0.5f * 1.0472f);   // 60 degree vertical field of view
+        const float A = zf / (zn - zf), B = zn * zf / (zn - zf);
+        // rows of the view matrix: s, u, -f; projection flips Y for Vulkan and maps depth to 0..1
+        const float vr[3][4] = {{s[0], s[1], s[2], -(s[0] * eye[0] + s[1] * eye[1] + s[2] * eye[2])},
+                                {u[0], u[1], u[2], -(u[0] * eye[0] + u[1] * eye[1] + u[2] * eye[2])},
+                                {-f[0], -f[1], -f[2], f[0] * eye[0] + f[1] * eye[1] + f[2] * eye[2]}};
+        float m[16];
+        for (int c = 0; c < 4; c++) {
+            m[c * 4 + 0] = (t / screen) * vr[0][c];
+            m[c * 4 + 1] = -t * vr[1][c];
+            m[c * 4 + 2] = A * vr[2][c] + (c == 3 ? B : 0.0f);
+            m[c * 4 + 3] = -vr[2][c];
+        }
+        vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_);
+        vkCmdPushConstants(cmd_, meshLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, m);
+        const VkDeviceSize zero = 0;
+        vkCmdBindVertexBuffers(cmd_, 0, 1, &vbuf_, &zero);
+        vkCmdBindIndexBuffer(cmd_, ibuf_, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd_, indexCount_, 1, 0, 0, 0);
+    } else {
+        vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set_, 0, nullptr);
+        // Fit the image inside the screen with a small margin, keeping its shape.
+        const float image = texH_ ? float(texW_) / float(texH_) : 1.0f;
+        float scale[2] = {0.94f, 0.94f};
+        if (image > screen) scale[1] *= screen / image; else scale[0] *= image / screen;
+        vkCmdPushConstants(cmd_, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, 8, scale);
+        vkCmdDraw(cmd_, 3, 1, 0, 0);
+    }
     vkCmdEndRenderPass(cmd_);
     vkEndCommandBuffer(cmd_);
 
@@ -516,6 +694,11 @@ void VkRenderer::shutdown() {
         vkDeviceWaitIdle(dev_);
         destroySwapchain();
         destroyTexture();
+        destroyMesh();
+        if (meshPipeline_) vkDestroyPipeline(dev_, meshPipeline_, nullptr);
+        if (meshLayout_) vkDestroyPipelineLayout(dev_, meshLayout_, nullptr);
+        meshPipeline_ = VK_NULL_HANDLE;
+        meshLayout_ = VK_NULL_HANDLE;
         if (sampler_) vkDestroySampler(dev_, sampler_, nullptr);
         if (descPool_) vkDestroyDescriptorPool(dev_, descPool_, nullptr);
         if (pipeline_) vkDestroyPipeline(dev_, pipeline_, nullptr);
