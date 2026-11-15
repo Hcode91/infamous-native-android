@@ -1,6 +1,7 @@
 // Sucker Punch "PACK" container, version 8 (.xpp files inside the world archives).
 // See docs/formats/xpp-pack.md for what is verified and what is still unknown.
 #pragma once
+#include <array>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -9,7 +10,7 @@ namespace ina {
 
 enum class SegmentKind : uint8_t {
     Object = 1,        // serialized engine objects
-    Fixups = 2,        // pointer fixups: which words of region 0 are pointers
+    Fixups = 2,        // pointer fixups and shared-geometry links
     Directory = 6,     // object directory
     Texture = 3,       // 0x70-byte texture descriptors
     BulkGpu = 13,      // texture pixel data
@@ -45,6 +46,21 @@ struct TextureInfo {
     uint32_t dataOffset = 0;    // relative to the data area
 };
 
+// Geometry shared between packs. A pack lists the vertex and index buffers it can lend under a 16-byte
+// hash, and a pack that borrows a buffer set names the hash and the mesh record that needs it.
+using GeometryHash = std::array<uint8_t, 16>;
+
+struct GeometryExport {
+    GeometryHash hash{};
+    uint32_t streams[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};   // data-area offsets; 0xFFFFFFFF = none
+    uint32_t indices = 0;                                            // data-area offset
+};
+
+struct GeometryImport {
+    uint32_t recordOffset = 0;   // data-area offset of the mesh record whose buffers are borrowed
+    GeometryHash hash{};
+};
+
 class Pack {
 public:
     // The pack keeps a view of `file`; the caller owns the bytes and keeps them alive.
@@ -67,14 +83,22 @@ public:
     const std::vector<uint32_t>& objects() const { return objects_; }
     // All pointer words, ascending, as data-area offsets.
     std::vector<uint32_t> pointerOffsets() const;
+    // Shared geometry this pack lends (sorted by hash) and borrows.
+    const std::vector<GeometryExport>& geometryExports() const { return exports_; }
+    const std::vector<GeometryImport>& geometryImports() const { return imports_; }
+    const GeometryExport* findGeometry(const GeometryHash& hash) const;
 
 private:
     void readFixups();
+    void readPointerLists(std::span<const uint8_t> body);
+    void readSharedGeometry(std::span<const uint8_t> body);
     void readDirectory();
     std::span<const uint8_t> file_, data_;
     std::vector<PackRegion> regions_;
     std::vector<PackSegment> segments_;
-    std::vector<bool> pointerWords_;   // one flag per word of region 0
+    std::vector<bool> pointerWords_;   // one flag per word of main memory (all main regions together)
+    std::vector<GeometryExport> exports_;
+    std::vector<GeometryImport> imports_;
     std::vector<uint32_t> objects_;
 };
 

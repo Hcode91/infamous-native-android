@@ -80,17 +80,34 @@ emitters.
 
 **Pointer fixups** (segment kind 2)
 
-The segment is a list of tagged chunks: `ILNK`, optionally `SPLP`, then `END `. `ILNK` records which
-32-bit words of region 0 are pointers:
+The segment is a list of chunks, each `tag, u32 body size, body`, ending with `END `. Chunks seen: `ILNK`,
+`GLOB` and `SPLP`. Large packs (`core.xpp`) have several fixup segments, and several main-memory regions
+laid out one after another from the start of the data area; the chunks of every fixup segment apply.
 
-- `ILNK`, `u32 size`, `u32 list count`, `u32 0`, `u32 length of list 0`, then for each further list
-  `u32 target region, u32 length`. Lengths are in 16-bit units. List 0 targets region 0.
-- Each list is a stream of u16 values giving word indexes (byte offset / 4) into region 0:
+`ILNK` records which 32-bit words of main memory are pointers:
+
+- Body: `u32 list count`, `u32 0`, `u32 length of list 0`, then for each further list
+  `u32 target region, u32 length`. Lengths are in 16-bit units. List 0 targets main memory.
+- Each list is a stream of u16 values giving word indexes (byte offset / 4), counted from the start of
+  the data area across all main regions:
   - below `0x8000`: the low 15 bits of a word index;
   - `0xC000 | n`: sets the high part, so following indexes are `n << 15 | value`;
   - `0x8000 | n`: the previous index starts a run of `n` consecutive pointer words.
 - A pointer's value is an offset into the data area and lands inside the list's target region. Checked
   on three packs of different sizes: every pointer in lists 0 and 1 lands in its region.
+
+`GLOB` shares vertex and index buffers between packs by a 16-byte hash (what is hashed is not known):
+
+- Body: `u32 E` (buffer sets this pack lends), `u32 I` (buffer sets it borrows), then `E + I` hashes of
+  16 bytes, the lent ones first, each group in ascending order.
+- Then `E` entries of four words: three vertex-stream offsets (`0xFFFFFFFF` when unused) and the
+  index-buffer offset, all into this pack's data area.
+- Then `I` words: for each borrowed set, the offset of the first stream slot (record + 0x34) of the mesh
+  record that needs the buffers. Such a record holds its counts and bounding box but no pointers.
+- Verified: in sector `A1` the 134 lent entries match the stream and index pointers of 134 of its own
+  mesh records, and the 62 borrowed records are exactly its 62 records without buffers. Across all 2,296
+  packs there are 35,590 borrowed records and every one of their hashes is lent by `core.xpp`, which is
+  always loaded.
 
 **Geometry**
 
@@ -101,6 +118,7 @@ See [world-geometry.md](world-geometry.md).
 - The remaining header fields (0x08-0x2B) and the tables between the segment table and the data area.
 - The `SPLP` chunk and the lists that target the fixup region (probably references to objects in other
   packs).
+- What the 16-byte hash of the `GLOB` chunk is computed from.
 - The layout of every other object class: materials, skeletons, animations, collision, world sectors,
   scripts.
 - The cube map face order.

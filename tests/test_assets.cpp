@@ -1,11 +1,14 @@
 // Unit tests with synthetic data only: no game files are needed or used.
+#include "assets/hex_map.h"
 #include "assets/pack.h"
 #include "assets/psarc.h"
 #include "assets/texture.h"
 #include "assets/world_mesh.h"
+#include "world/scene.h"
 #include "core/bytes.h"
 
 #include <zlib.h>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -124,12 +127,33 @@ static void bef(std::vector<uint8_t>& v, float f) {
     memcpy(&u, &f, 4);
     be32(v, u);
 }
-// An ILNK chunk with one list of 16-bit codes.
-static std::vector<uint8_t> makeFixups(const std::vector<uint16_t>& codes) {
+// A GLOB chunk: buffer sets a pack lends (hash, three streams, indexes) and borrows (hash, record offset).
+struct Lend {
+    uint8_t hash;   // every byte of the 16-byte hash
+    uint32_t streams[3], indices;
+};
+static std::vector<uint8_t> makeGlob(const std::vector<Lend>& lends, const std::vector<std::pair<uint8_t, uint32_t>>& borrows) {
+    std::vector<uint8_t> body;
+    be32(body, uint32_t(lends.size())); be32(body, uint32_t(borrows.size()));
+    for (const Lend& l : lends) body.insert(body.end(), 16, l.hash);
+    for (const auto& b : borrows) body.insert(body.end(), 16, b.first);
+    for (const Lend& l : lends) { be32(body, l.streams[0]); be32(body, l.streams[1]); be32(body, l.streams[2]); be32(body, l.indices); }
+    for (const auto& b : borrows) be32(body, b.second + 0x34);
+    std::vector<uint8_t> f = {'G', 'L', 'O', 'B'};
+    be32(f, uint32_t(body.size()));
+    f.insert(f.end(), body.begin(), body.end());
+    return f;
+}
+// A fixup segment: an ILNK chunk with one list of 16-bit codes, any further chunks, and the END chunk.
+static std::vector<uint8_t> makeFixups(const std::vector<uint16_t>& codes, const std::vector<uint8_t>& moreChunks = {}) {
+    std::vector<uint8_t> body;
+    be32(body, 1); be32(body, 0); be32(body, uint32_t(codes.size()));
+    for (uint16_t c : codes) { body.push_back(uint8_t(c >> 8)); body.push_back(uint8_t(c)); }
+    while (body.size() % 4) body.push_back(0);
     std::vector<uint8_t> f = {'I', 'L', 'N', 'K'};
-    be32(f, 0); be32(f, 1); be32(f, 0); be32(f, uint32_t(codes.size()));
-    for (uint16_t c : codes) { f.push_back(uint8_t(c >> 8)); f.push_back(uint8_t(c)); }
-    while (f.size() % 4) f.push_back(0);
+    be32(f, uint32_t(body.size()));
+    f.insert(f.end(), body.begin(), body.end());
+    f.insert(f.end(), moreChunks.begin(), moreChunks.end());
     f.insert(f.end(), {'E', 'N', 'D', ' ', 0, 0, 0, 0});
     return f;
 }
@@ -288,7 +312,97 @@ int main() {
         if (inst.size() == 1) CHECK(inst[0].mesh == 0 && inst[0].objectOid == 9 && inst[0].flags == 0 && inst[0].matrix[3] == 100.0f);
         const auto slots = readMaterialTextures(p, matAt);
         CHECK(slots.size() == 2 && slots[0].first == 3 && slots[0].second == 555);
-        {
+    }
+    // Shared geometry: a sector-like pack whose record has no buffers of its own borrows them, by hash, from
+    // a second pack. The record also carries an origin and a detail range; a hex map object places it.
+    {
+        auto put = [](std::vector<uint8_t>& r, size_t o, uint32_t v) { r[o] = uint8_t(v >> 24); r[o + 1] = uint8_t(v >> 16); r[o + 2] = uint8_t(v >> 8); r[o + 3] = uint8_t(v); };
+        auto putf = [&](std::vector<uint8_t>& r, size_t o, float f) { uint32_t u; memcpy(&u, &f, 4); put(r, o, u); };
+        // the lending pack: a 12-byte position stream, a 14-byte second stream with the texture coordinates
+        const uint32_t vbAt = 0x40, uvAt = 0x80, ibAt = 0xC0;
+        std::vector<uint8_t> c0(0x100, 0);
+        const float verts[3][3] = {{-1, -1, 0}, {1, -1, 0}, {0, 1, 2}};
+        for (int v = 0; v < 3; v++) {
+            for (int c = 0; c < 3; c++) putf(c0, vbAt + size_t(v) * 12 + size_t(c) * 4, verts[v][c]);
+            c0[uvAt + size_t(v) * 14 + 8] = 0x3C;    // u = 1.0
+            c0[uvAt + size_t(v) * 14 + 10] = 0x38;   // v = 0.5
+        }
+        c0[ibAt + 3] = 1; c0[ibAt + 5] = 2;
+        // pointers of its own to the three buffers, so their extents are known
+        put(c0, 0x10, vbAt); put(c0, 0x14, uvAt); put(c0, 0x18, ibAt); put(c0, 0x1C, uvAt + 3 * 14);
+        std::vector<uint8_t> dir0;
+        be32(dir0, 0); be32(dir0, 0);
+        const std::vector<uint8_t> coreFile = makePackFromSegments(
+            {{1, 0x10, c0}, {6, 4, dir0}, {2, 4, makeFixups({0xC000, 4, 5, 6, 7}, makeGlob({{0xAB, {vbAt, uvAt, 0xFFFFFFFFu}, ibAt}}, {}))}});
+        Pack core(coreFile);
+        CHECK(core.geometryExports().size() == 1 && core.geometryImports().empty());
+        GeometryHash h;
+        h.fill(0xAB);
+        CHECK(core.findGeometry(h) && core.findGeometry(h)->indices == ibAt);
+        h[3] = 0;
+        CHECK(!core.findGeometry(h));
+
+        // the borrowing pack
+        const uint32_t recAt = 0x100, matAt = 0x20, objAt = 0x200, piecesAt = 0x2C0, matsAt = 0x2D0, cellsAt = 0x400;
+        std::vector<uint8_t> r0(0x500, 0);
+        put(r0, recAt, 77);
+        put(r0, recAt + 4, 1u << 16 | 3);        // one triangle
+        put(r0, recAt + 8, matAt);
+        put(r0, recAt + 12, 0x04050000);         // drawn at detail levels 4 to 5
+        const float box[6] = {-1, -1, 0, 1, 1, 2};
+        for (int i = 0; i < 6; i++) putf(r0, recAt + 0x10 + size_t(i) * 4, box[i]);
+        putf(r0, recAt + 0x28, 1000.0f);         // origin
+        for (int k = 0; k < 3; k++) put(r0, recAt + 0x38 + size_t(k) * 8, 0xFFFFFFFFu);   // no buffers of its own
+        put(r0, recAt + 0x50, 0xFFFFFFFFu);
+        put(r0, recAt + 0x54, 3);
+        put(r0, objAt, kHexMapClass); put(r0, objAt + 12, 9);
+        put(r0, objAt + 0x90, piecesAt); put(r0, objAt + 0x94, 1);
+        put(r0, objAt + 0x98, matsAt); put(r0, objAt + 0x9C, 1);
+        put(r0, objAt + 0xA8, recAt); put(r0, objAt + 0xAC, 1);
+        const float mat[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        for (int i = 0; i < 12; i++) putf(r0, matsAt + size_t(i) * 4, mat[i]);
+        put(r0, objAt + 0x1F0, cellsAt); put(r0, objAt + 0x1F4, 1);
+        putf(r0, cellsAt, -10500.0f); putf(r0, cellsAt + 4, 6062.0f); putf(r0, cellsAt + 8, 600.0f); putf(r0, cellsAt + 12, 1.0f);
+        put(r0, cellsAt + 16, 0xFFFF0001u);      // column -1, row 1
+        put(r0, cellsAt + 28, 214);
+        auto w = [](uint32_t off) { return uint16_t(off / 4); };
+        std::vector<uint8_t> dir;
+        be32(dir, 1); be32(dir, 1); be32(dir, objAt);
+        const std::vector<uint8_t> file = makePackFromSegments(
+            {{1, 0x10, r0}, {6, 4, dir},
+             {2, 4, makeFixups({0xC000, w(recAt + 8), w(objAt + 0x90), w(objAt + 0x98), w(objAt + 0xA8), w(objAt + 0x1F0)}, makeGlob({}, {{0xAB, recAt}}))}});
+        Pack p(file);
+        CHECK(p.geometryImports().size() == 1 && p.geometryImports()[0].recordOffset == recAt);
+        size_t skipped = 0;
+        CHECK(readStaticMeshes(p, &skipped).empty() && skipped == 1);   // without the shared pack
+        const SharedGeometry shared(core);
+        const auto meshes = readStaticMeshes(p, &skipped, &shared);
+        CHECK(meshes.size() == 1 && skipped == 0);
+        if (meshes.size() == 1) {
+            const StaticMesh& m = meshes[0];
+            CHECK(m.shared && m.nameOid == 77 && m.vertexStride == 12 && m.lodMin == 4 && m.lodMax == 5 && m.flags == 3);
+            CHECK(m.positions.size() == 9 && m.positions[0] == 999.0f && m.positions[8] == 2.0f);   // origin added
+            CHECK(m.uvs.size() == 6 && m.uvs[0] == 1.0f && m.uvs[1] == 0.5f);
+            CHECK(m.indices.size() == 3 && m.indices[2] == 2);
+        }
+        CHECK(readMeshInstances(p, meshes).empty());                    // no object of the sector class
+        const auto inst = readMeshInstances(p, meshes, nullptr, kHexMapClass);
+        CHECK(inst.size() == 1);
+        const auto cells = readHexCells(p);
+        CHECK(cells.size() == 1);
+        if (cells.size() == 1) CHECK(cells[0].nameOid == 214 && cells[0].column == -1 && cells[0].row == 1 && cells[0].center[0] == -10500.0f);
+        // scene: the piece twice, the second copy moved; one untextured group
+        if (inst.size() == 1 && meshes.size() == 1) {
+            SceneBuilder b;
+            const float zero[3] = {0, 0, 0}, moved[3] = {0, 50, 0};
+            b.add(meshes[0], inst[0].matrix.data(), zero);
+            b.add(meshes[0], inst[0].matrix.data(), moved);
+            CHECK(b.pieces() == 2 && b.triangles() == 2 && b.centers().size() == 6);
+            const Scene s = b.finish();
+            CHECK(s.vertices.size() == 6 * 8 && s.indices.size() == 6 && s.batches.size() == 1);
+            CHECK(s.indices[3] == 3 && s.batches[0].indexCount == 6 && s.batches[0].textureOid == 0);
+            CHECK(s.boxMin[0] == 999.0f && s.boxMax[1] == 51.0f);
+            CHECK(std::fabs(s.vertices[5] - 0.7071f) < 0.001f && std::fabs(s.vertices[4] + 0.7071f) < 0.001f);   // unit normal of the triangle
         }
     }
     (void)bef;

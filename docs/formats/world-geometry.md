@@ -11,11 +11,12 @@ The sector packs (`A1.xpp` … `C24.xpp`) hold uncompressed meshes. Each mesh ha
 |---|---|---|
 | 0x00 | u32 | name (object id) |
 | 0x04 | u16 | triangle count |
-| 0x06 | u16 | flags (3 is by far the most common; not decoded) |
+| 0x06 | u16 | flags (3 is by far the most common, 1 on decals; not decoded) |
 | 0x08 | ptr | material object |
-| 0x0C | u32 | format word (not decoded) |
+| 0x0C | u8, u8, u16 | lowest and highest level of detail the mesh is drawn at, then 0 |
 | 0x10 | 3 x f32 | bounding box minimum |
 | 0x1C | 3 x f32 | bounding box maximum |
+| 0x28 | 3 x f32 | origin, added to every position (zero in sector packs) |
 | 0x34 | 3 x (ptr, ptr) | up to three vertex streams. A used slot holds the same pointer twice; an unused slot holds `0, 0xFFFFFFFF` |
 | 0x4C | ptr, ptr | index buffer (same pointer twice) |
 | 0x54 | u32 | vertex count |
@@ -25,6 +26,18 @@ The sector packs (`A1.xpp` … `C24.xpp`) hold uncompressed meshes. Each mesh ha
   up. It is 12 bytes per vertex when it holds only the position, and 16 or more when other attributes
   follow (one case seen: two half-floats that look like texture coordinates).
 - A second stream, when present, holds half-float vectors (normals in the case examined).
+
+**Levels of detail.** Level 0 is the nearest. The values seen are 0-3, 0-4, 0-5, 0-6, 4-5, 5-5 and 6-6.
+Evidence: where an object has two meshes for the same part, the one with more triangles is 0-3 and the
+other 4-5 (and in one case the second is literally named with an `lod` suffix); the far-away city
+described below is all 6-6. Drawing only the meshes whose range includes 0 removes the doubled geometry.
+The distances at which the game switches level are not known.
+
+**Borrowed buffers.** About a third of the pieces in a sector use records with counts and a bounding box
+but no stream or index pointers: lamps, pipes, railings, pier columns and other parts repeated across the
+city. Their buffers are in the shared pack `core.xpp` and are found through the `GLOB` chunk of the fixup
+segment (see [xpp-pack.md](xpp-pack.md)). With them, sector `A1` goes from 587 to 873 placed pieces and
+the pier gains its columns, lamps and railings (checked by eye).
 
 **Texture coordinates** are two half-floats per vertex. When the mesh has a single wide stream they are its
 last four bytes. Otherwise they are 8 bytes into the second stream, whose vertex is 14 bytes (two packed
@@ -47,23 +60,49 @@ id 0x168 in the EU disc release) puts its meshes in place with three tables, eac
 
 A sector pack holds several static objects: one named `__merged_statics_geom` whose transforms are in the
 sector's coordinates, and others for larger structures. Applying the tables to sector `A1` assembles a
-coherent waterfront: a pier with a building, lamp posts, curved retaining walls and rocks (597 pieces;
-318 more refer to meshes that are not decoded, most of them records without vertex streams).
+coherent waterfront: a pier with a building, lamp posts, curved retaining walls and rocks. At the nearest
+level of detail it is 676 pieces and 86,599 triangles; 32 more pieces use meshes that are not decoded.
 
-**Verified** on sector `A1`: 199 records found, and in every one the highest index equals the vertex count
-minus one. Drawn untextured, the result is recognisable architecture (columns, a stepped plinth, a tower).
+**Verified** on sector `A1`: in every record found, the highest index equals the vertex count minus one.
+Drawn untextured, the result is recognisable architecture (columns, a stepped plinth, a tower).
 
 **Approximate:** the vertex size of the first stream is not read from the record yet. The reader tries
-12, 16, 20 and 24 bytes and accepts the first for which every position lies inside the record's bounding
-box. In `A1` this decodes 187 of 199 meshes; the other 12 are skipped.
+12, 16, 20, 24 and 28 bytes and accepts the first for which every position lies inside the record's
+bounding box. In `A1` this decodes 243 of 261 meshes; the other 18 are skipped (decals and trees among
+them).
 
 The same heuristic applies to the second stream: 14 or 18 bytes is chosen by the space the stream occupies
-and by whether the values read as plausible coordinates. In `A1`, 175 of the 187 decoded meshes get
-texture coordinates, 133 have a colour map, and all 53 textures they name were found. Checked by eye on a
-sign (its face maps onto the whole sign texture) and by a rough software render of the sector.
+and by whether the values read as plausible coordinates. Checked by eye on a sign (its face maps onto the
+whole sign texture) and by a rough software render of the sector.
 
-**Not known:** the format word and flags, the packed vectors, materials of other shader classes, and where
-records without vertex streams get their geometry, what the piece flags mean, and how sectors are positioned relative to each other.
+**Not known:** the flags, the packed vectors, materials of other shader classes, what the piece flags
+mean, the vertex layout of decals and trees, and the further tables of a static object (offsets 0xC8 on).
+
+## The city: hex cells
+
+The city is a grid of hexagonal cells, flat side up, 14,000 units across corners. Each sector pack holds
+one cell in its own coordinates, centred on its origin. The city-wide pack `EMPIRE.xpp` has one hex map
+object (class `CID_HexMapData`, id 0x1A1 in the EU disc release) that says where each cell goes:
+
+- object + 0x1F0: pointer to the cell table; + 0x1F4: cell count (111).
+- A cell is 32 bytes: `f32 x, y, z, 1.0` (where the sector's origin goes), `s16 column, s16 row`,
+  two flag words (not decoded) and the sector's name as an object id. The names are the pack names in
+  lower case (`a1` for `A1.xpp`).
+- `x = 10500 * column` and `y = 12124.36 * (row + column / 2)` for the 99 cells of the open city. Their
+  `z` is 0, or 600 in the 19 cells whose first flag word is 0x10000.
+- Nine cells with the first flag word 4 (all numbered from 100 up) are placed apart from the islands and
+  3,000 to 11,400 units lower, and three cells have both flag words and the grid position zero. What
+  these twelve are for is not known.
+
+**Verified:** with every sector moved to its cell, a plot of all piece positions shows streets, piers and
+bridges continuing across cell edges.
+
+**The far-away city.** The hex map object also carries the piece, transform and mesh tables of a static
+object, at the same offsets (0x90, 0x98, 0xA8): 3,703 pieces, 2,810 meshes, all at level of detail 6-6.
+The meshes are named after the sector they stand in for, keep their vertices centred, and carry their
+place in the city in the record's origin field. Assembled, they give the whole city in 191,920
+triangles: three islands, their bridges and piers (checked by eye). This is what the game draws for
+sectors that are not loaded in detail.
 
 ## Compressed model geometry (characters, props, weapons)
 

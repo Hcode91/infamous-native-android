@@ -1,0 +1,45 @@
+// Builds one drawable scene out of placed static meshes: vertices in city coordinates with smooth normals,
+// grouped so that each texture is bound once. Independent of the renderer.
+#pragma once
+#include "assets/world_mesh.h"
+
+#include <cstdint>
+#include <map>
+#include <vector>
+
+namespace ina {
+
+struct SceneBatch {
+    uint32_t firstIndex = 0, indexCount = 0;
+    uint32_t textureOid = 0;      // 0: untextured
+};
+
+struct Scene {
+    std::vector<float> vertices;  // position xyz, normal xyz, uv: 8 floats per vertex
+    std::vector<uint32_t> indices;
+    std::vector<SceneBatch> batches;
+    size_t pieces = 0;
+    float boxMin[3] = {0, 0, 0}, boxMax[3] = {0, 0, 0};
+};
+
+class SceneBuilder {
+public:
+    // Adds one copy of `mesh`, transformed by the 3x4 row-major `matrix` and then moved by `offset`.
+    void add(const StaticMesh& mesh, const float matrix[12], const float offset[3]);
+    size_t pieces() const { return pieces_; }
+    size_t triangles() const { return triangles_; }
+    // Centre points of the pieces added so far (x, y, z each), for aiming a camera.
+    const std::vector<float>& centers() const { return centers_; }
+    Scene finish();
+
+private:
+    struct Group {
+        std::vector<float> vertices;
+        std::vector<uint32_t> indices;
+    };
+    std::map<uint32_t, Group> groups_;   // by texture oid
+    std::vector<float> centers_;
+    size_t pieces_ = 0, triangles_ = 0;
+};
+
+}  // namespace ina

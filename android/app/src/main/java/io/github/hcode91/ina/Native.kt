@@ -14,8 +14,11 @@ object Native {
     /** Moves by packs and/or textures and returns a description of what is shown. */
     @JvmStatic external fun step(packDelta: Int, textureDelta: Int): String
 
-    /** Shows the static geometry of a city sector, moving by [delta] sectors. Returns a description. */
+    /** Shows a city sector in full detail, in its place in the city, moving by [delta] sectors. Returns a description. */
     @JvmStatic external fun world(delta: Int): String
+
+    /** Shows the whole city as drawn from far away. Returns a description. */
+    @JvmStatic external fun city(): String
 
     /** Goes back to the texture viewer. */
     @JvmStatic external fun hideWorld()

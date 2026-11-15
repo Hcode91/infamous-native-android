@@ -1,0 +1,76 @@
+#include "world/scene.h"
+
+#include <algorithm>
+#include <cmath>
+
+namespace ina {
+
+void SceneBuilder::add(const StaticMesh& m, const float tm[12], const float offset[3]) {
+    const size_t nv = m.positions.size() / 3;
+    if (nv == 0 || m.indices.empty()) return;
+    Group& g = groups_[m.uvs.empty() ? 0u : m.colorTextureOid];
+    std::vector<float> placed(nv * 3);
+    float sum[3] = {0, 0, 0};
+    for (size_t v = 0; v < nv; v++) {
+        const float x = m.positions[v * 3], y = m.positions[v * 3 + 1], z = m.positions[v * 3 + 2];
+        placed[v * 3] = tm[0] * x + tm[1] * y + tm[2] * z + tm[3] + offset[0];
+        placed[v * 3 + 1] = tm[4] * x + tm[5] * y + tm[6] * z + tm[7] + offset[1];
+        placed[v * 3 + 2] = tm[8] * x + tm[9] * y + tm[10] * z + tm[11] + offset[2];
+        for (int c = 0; c < 3; c++) sum[c] += placed[v * 3 + size_t(c)];
+    }
+    // Smooth normals from the triangles: the game's own normals are in a vertex stream not decoded yet.
+    std::vector<float> normal(nv * 3, 0.0f);
+    for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
+        const float* a = &placed[m.indices[t] * 3];
+        const float* b = &placed[m.indices[t + 1] * 3];
+        const float* c = &placed[m.indices[t + 2] * 3];
+        const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, v[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+        const float fn[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+        for (int k = 0; k < 3; k++)
+            for (int c2 = 0; c2 < 3; c2++) normal[m.indices[t + size_t(k)] * 3 + size_t(c2)] += fn[c2];
+    }
+    const uint32_t base = uint32_t(g.vertices.size() / 8);
+    for (size_t v = 0; v < nv; v++) {
+        const float* nn = &normal[v * 3];
+        const float len = std::sqrt(nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]);
+        for (int c = 0; c < 3; c++) g.vertices.push_back(placed[v * 3 + size_t(c)]);
+        for (int c = 0; c < 3; c++) g.vertices.push_back(len > 0 ? nn[c] / len : (c == 2 ? 1.0f : 0.0f));
+        g.vertices.push_back(m.uvs.empty() ? 0.0f : m.uvs[v * 2]);
+        g.vertices.push_back(m.uvs.empty() ? 0.0f : m.uvs[v * 2 + 1]);
+    }
+    for (uint32_t i : m.indices) g.indices.push_back(base + i);
+    for (int c = 0; c < 3; c++) centers_.push_back(sum[c] / float(nv));
+    pieces_++;
+    triangles_ += m.indices.size() / 3;
+}
+
+Scene SceneBuilder::finish() {
+    Scene s;
+    s.pieces = pieces_;
+    bool first = true;
+    for (auto& [oid, g] : groups_) {
+        const uint32_t base = uint32_t(s.vertices.size() / 8);
+        SceneBatch b;
+        b.firstIndex = uint32_t(s.indices.size());
+        b.indexCount = uint32_t(g.indices.size());
+        b.textureOid = oid;
+        s.batches.push_back(b);
+        for (size_t v = 0; v + 7 < g.vertices.size(); v += 8) {
+            for (int c = 0; c < 3; c++) {
+                const float x = g.vertices[v + size_t(c)];
+                if (first || x < s.boxMin[c]) s.boxMin[c] = x;
+                if (first || x > s.boxMax[c]) s.boxMax[c] = x;
+            }
+            first = false;
+        }
+        s.vertices.insert(s.vertices.end(), g.vertices.begin(), g.vertices.end());
+        for (uint32_t i : g.indices) s.indices.push_back(base + i);
+        g = Group{};
+    }
+    groups_.clear();
+    centers_.clear();
+    pieces_ = triangles_ = 0;
+    return s;
+}
+
+}  // namespace ina

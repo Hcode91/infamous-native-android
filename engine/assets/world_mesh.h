@@ -14,9 +14,14 @@ struct StaticMesh {
     uint32_t recordOffset = 0;            // data-area offset of the mesh record
     uint32_t nameOid = 0;                 // name, by line in the game's oid_manifest.txt
     uint32_t materialOffset = 0;          // data-area offset of the mesh's material object
-    std::array<float, 3> boxMin{}, boxMax{};
+    std::array<float, 3> boxMin{}, boxMax{};   // around the vertices as stored, before `origin` is added
+    std::array<float, 3> origin{};             // added to every position (zero in sector packs; the far-away
+                                               // city meshes keep their vertices centred and their place here)
+    uint16_t flags = 0;                        // low half of record word 1: 3 for most meshes, 1 for decals
+    uint8_t lodMin = 0, lodMax = 0;            // range of detail levels the mesh is drawn at; 0 is nearest
+    bool shared = false;                       // vertex data borrowed from the shared pack
     uint32_t vertexStride = 0;            // bytes per vertex in the position stream
-    std::vector<float> positions;         // x, y, z per vertex, in the game's world units (z is up)
+    std::vector<float> positions;         // x, y, z per vertex with `origin` added; z is up
     std::vector<float> uvs;               // u, v per vertex; empty when the layout was not recognised
     std::vector<uint32_t> indices;        // triangle list
     uint32_t colorTextureOid = 0;         // the material's colour texture (0 when it has none)
@@ -36,14 +41,31 @@ struct MeshInstance {
     std::array<float, 12> matrix{};
 };
 
-// Lists the placed pieces of every static object in a pack. Pieces whose mesh was not decoded are left out
-// and counted in `missing` when it is given. `staticObjectClass` is the class id of static objects (0x168
-// in the EU disc release).
+// Class ids (EU disc release) of the objects that carry piece, transform and mesh tables.
+inline constexpr uint32_t kStaticObjectClass = 0x168;   // SoData: the static objects of a sector
+inline constexpr uint32_t kHexMapClass = 0x1A1;         // HexMapData: the far-away version of the whole city
+
+// Lists the placed pieces of every object of class `objectClass` in a pack. Pieces whose mesh was not
+// decoded are left out and counted in `missing` when it is given.
 std::vector<MeshInstance> readMeshInstances(const Pack& pack, const std::vector<StaticMesh>& meshes, size_t* missing = nullptr,
-                                            uint32_t staticObjectClass = 0x168);
+                                            uint32_t objectClass = kStaticObjectClass);
+
+// Vertex and index buffers that other packs borrow, looked up by hash. Built once from the shared pack
+// ("core.xpp"), which must outlive it.
+class SharedGeometry {
+public:
+    explicit SharedGeometry(const Pack& pack);
+    const Pack& pack() const { return *pack_; }
+    const std::vector<uint32_t>& targets() const { return targets_; }
+
+private:
+    const Pack* pack_;
+    std::vector<uint32_t> targets_;   // every pointer target of the pack, ascending
+};
 
 // Finds and decodes every static mesh record in a pack. Records whose vertex layout cannot be confirmed
-// are skipped and counted in `skipped` when it is given.
-std::vector<StaticMesh> readStaticMeshes(const Pack& pack, size_t* skipped = nullptr);
+// are skipped and counted in `skipped` when it is given. Records that borrow their buffers are decoded
+// when `shared` holds them, and count as skipped otherwise.
+std::vector<StaticMesh> readStaticMeshes(const Pack& pack, size_t* skipped = nullptr, const SharedGeometry* shared = nullptr);
 
 }  // namespace ina

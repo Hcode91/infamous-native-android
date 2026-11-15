@@ -37,7 +37,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var controls: LinearLayout
     private var opened = false
     private var worldMode = false
+    private var cityMode = false
     private lateinit var modeButton: Button
+    private lateinit var cityButton: Button
     private var lastX = 0f
     private var lastY = 0f
 
@@ -95,7 +97,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         fun add(label: String, packs: Int, textures: Int) {
             controls.addView(Button(this).apply {
                 text = label
-                setOnClickListener { if (worldMode) { if (packs != 0) showWorld(packs) } else step(packs, textures) }
+                setOnClickListener {
+                    if (worldMode) {
+                        if (packs != 0) { cityMode = false; cityButton.text = "City"; showWorld(packs) }
+                    } else step(packs, textures)
+                }
             })
         }
         add("◀ Pack", -1, 0)
@@ -107,11 +113,26 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             setOnClickListener {
                 if (!opened) return@setOnClickListener
                 worldMode = !worldMode
+                cityMode = false
+                cityButton.text = "City"
+                cityButton.visibility = if (worldMode) View.VISIBLE else View.GONE
                 text = if (worldMode) "Textures" else "World"
                 if (worldMode) showWorld(0) else { Native.hideWorld(); step(0, 0) }
             }
         }
         controls.addView(modeButton)
+        // In the world view: the whole city from far away, or back to the current sector.
+        cityButton = Button(this).apply {
+            text = "City"
+            visibility = View.GONE
+            setOnClickListener {
+                if (!opened || !worldMode) return@setOnClickListener
+                cityMode = !cityMode
+                text = if (cityMode) "Sector" else "City"
+                if (cityMode) showCity() else showWorld(0)
+            }
+        }
+        controls.addView(cityButton)
         controls.visibility = View.GONE
         root.addView(controls, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
 
@@ -245,6 +266,15 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         info.text = "Loading sector…"
         thread {
             val text = Native.world(delta)
+            ui.post { info.text = text }
+        }
+    }
+
+    private fun showCity() {
+        if (!opened) return
+        info.text = "Loading the city…"
+        thread {
+            val text = Native.city()
             ui.post { info.text = text }
         }
     }

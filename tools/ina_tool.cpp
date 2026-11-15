@@ -2,18 +2,22 @@
 //   ina_tool list <archive.psarc_s>
 //   ina_tool packs <archive.psarc_s>                    summary of every pack
 //   ina_tool textures <archive.psarc_s> <pack name> <out dir> [oid_manifest.txt]
-//   ina_tool meshes <archive.psarc_s> <pack name> [out.obj]   static world geometry
+//   ina_tool meshes <archive.psarc_s> <pack name> [out.obj] [archive holding core.xpp]   a sector, assembled
+//   ina_tool city <archive holding EMPIRE.xpp> [out.obj] [oid_manifest.txt]             the far-away city and its hex cells
+#include "assets/hex_map.h"
 #include "assets/pack.h"
 #include "assets/psarc.h"
 #include "assets/texture.h"
 #include "assets/world_mesh.h"
 #include "core/bytes.h"
 #include "core/png.h"
+#include "world/scene.h"
 
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -41,7 +45,9 @@ static const char* formatName(PixelFormat f) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: ina_tool list|packs <archive>\n       ina_tool textures <archive> <pack> <out dir> [oid_manifest.txt]\n");
+        fprintf(stderr, "usage: ina_tool list|packs <archive>\n       ina_tool textures <archive> <pack> <out dir> [oid_manifest.txt]\n"
+                        "       ina_tool meshes <archive> <pack> [out.obj] [archive holding core.xpp]\n"
+                        "       ina_tool city <archive> [out.obj] [oid_manifest.txt]\n");
         return 2;
     }
     try {
@@ -103,48 +109,89 @@ int main(int argc, char** argv) {
             printf("%d textures written\n", n);
             return 0;
         }
-        if (cmd == "meshes" && argc >= 4) {   // ina_tool meshes <archive> <pack> [out.obj]
-            const int idx = arc.find(argv[3]);
+        if ((cmd == "meshes" && argc >= 4) || cmd == "city") {
+            // ina_tool meshes <archive> <pack> [out.obj] [archive holding core.xpp]
+            // ina_tool city <archive holding EMPIRE.xpp> [out.obj] [oid_manifest.txt]
+            const bool city = cmd == "city";
+            const char* packName = city ? "EMPIRE.xpp" : argv[3];
+            const char* objPath = city ? (argc > 3 ? argv[3] : nullptr) : (argc > 4 ? argv[4] : nullptr);
+            const int idx = arc.find(packName);
             if (idx < 0) {
-                fprintf(stderr, "no pack named %s\n", argv[3]);
+                fprintf(stderr, "no pack named %s\n", packName);
                 return 1;
             }
             const auto bytes = arc.read(size_t(idx));
             Pack p(bytes);
-            size_t skipped = 0, tris = 0, verts = 0, withUv = 0, withTex = 0;
-            const auto meshes = readStaticMeshes(p, &skipped);
+            // Meshes that borrow their buffers need the shared pack.
+            std::vector<uint8_t> coreBytes;
+            std::unique_ptr<Pack> core;
+            std::unique_ptr<SharedGeometry> shared;
+            if (!p.geometryImports().empty()) {
+                std::unique_ptr<Psarc> other;
+                const Psarc* from = &arc;
+                int ci = arc.find("core.xpp");
+                if (ci < 0 && !city && argc > 5) {
+                    other = std::make_unique<Psarc>(argv[5]);
+                    from = other.get();
+                    ci = other->find("core.xpp");
+                }
+                if (ci >= 0) {
+                    coreBytes = from->read(size_t(ci));
+                    core = std::make_unique<Pack>(coreBytes);
+                    shared = std::make_unique<SharedGeometry>(*core);
+                }
+            }
+            size_t skipped = 0, tris = 0, verts = 0, withUv = 0, withTex = 0, borrowed = 0;
+            const auto meshes = readStaticMeshes(p, &skipped, shared.get());
             for (const auto& m : meshes) {
                 tris += m.indices.size() / 3;
                 verts += m.positions.size() / 3;
                 withUv += !m.uvs.empty();
                 withTex += m.colorTextureOid != 0;
+                borrowed += m.shared;
             }
-            size_t missingPieces = 0, placedTris = 0;
-            const auto instances = readMeshInstances(p, meshes, &missingPieces);
-            // The OBJ file holds the assembled pack: every ordinary piece, transformed into place.
-            FILE* obj = argc > 4 ? fopen(argv[4], "w") : nullptr;
-            size_t base = 1;
+            if (city) {
+                const auto names = argc > 4 ? loadNames(argv[4]) : std::vector<std::string>();
+                const auto cells = readHexCells(p);
+                printf("%zu hex cells\n", cells.size());
+                for (const HexCell& c : cells)
+                    printf("  %-6s column %3d row %3d  centre %.1f %.1f %.1f  flags %x %x\n",
+                           c.nameOid < names.size() ? names[c.nameOid].c_str() : std::to_string(c.nameOid).c_str(), c.column, c.row,
+                           c.center[0], c.center[1], c.center[2], c.flags[0], c.flags[1]);
+            }
+            size_t missingPieces = 0;
+            const auto instances = readMeshInstances(p, meshes, &missingPieces, city ? kHexMapClass : kStaticObjectClass);
+            // The scene is the assembled pack: every ordinary piece, transformed into place. A sector is
+            // drawn at its nearest level of detail; the far-away city has one level only.
+            SceneBuilder builder;
+            const float zero[3] = {0, 0, 0};
             for (const auto& in : instances) {
-                if (in.flags != 0) continue;
                 const StaticMesh& m = meshes[in.mesh];
-                placedTris += m.indices.size() / 3;
-                if (!obj) continue;
-                const auto& t = in.matrix;
-                for (size_t v = 0; v < m.positions.size(); v += 3) {
-                    const float x = m.positions[v], y = m.positions[v + 1], z = m.positions[v + 2];
-                    fprintf(obj, "v %g %g %g\n", t[0] * x + t[1] * y + t[2] * z + t[3], t[4] * x + t[5] * y + t[6] * z + t[7],
-                            t[8] * x + t[9] * y + t[10] * z + t[11]);
-                }
-                for (size_t k = 0; k < m.indices.size(); k += 3)
-                    fprintf(obj, "f %zu %zu %zu\n", base + m.indices[k], base + m.indices[k + 1], base + m.indices[k + 2]);
-                base += m.positions.size() / 3;
+                if (in.flags != 0 || (!city && m.lodMin != 0)) continue;
+                builder.add(m, in.matrix.data(), zero);
             }
-            if (obj) fclose(obj);
-            printf("%zu placed pieces (%zu more use meshes that were not decoded), %zu triangles once placed\n", instances.size(),
-                   missingPieces, placedTris);
-            printf("%zu objects, %zu pointer words, %zu static meshes (%zu skipped), %zu triangles, %zu vertices\n",
-                   p.objects().size(), p.pointerOffsets().size(), meshes.size(), skipped, tris, verts);
-            printf("%zu meshes with texture coordinates, %zu with a colour texture\n", withUv, withTex);
+            const size_t placedPieces = builder.pieces(), placedTris = builder.triangles();
+            const Scene scene = builder.finish();
+            if (objPath) {
+                FILE* obj = fopen(objPath, "w");
+                if (!obj) {
+                    fprintf(stderr, "cannot write %s\n", objPath);
+                    return 1;
+                }
+                for (size_t v = 0; v + 7 < scene.vertices.size(); v += 8)
+                    fprintf(obj, "v %g %g %g\n", scene.vertices[v], scene.vertices[v + 1], scene.vertices[v + 2]);
+                for (size_t k = 0; k + 2 < scene.indices.size(); k += 3)
+                    fprintf(obj, "f %u %u %u\n", scene.indices[k] + 1, scene.indices[k + 1] + 1, scene.indices[k + 2] + 1);
+                fclose(obj);
+            }
+            printf("%zu pieces placed at the nearest level of detail (%zu pieces in all, %zu more use meshes that were not decoded), %zu triangles\n",
+                   placedPieces, instances.size(), missingPieces, placedTris);
+            printf("box %.0f %.0f %.0f .. %.0f %.0f %.0f, %zu texture groups\n", scene.boxMin[0], scene.boxMin[1], scene.boxMin[2],
+                   scene.boxMax[0], scene.boxMax[1], scene.boxMax[2], scene.batches.size());
+            printf("%zu objects, %zu pointer words, %zu static meshes (%zu borrowed from the shared pack, %zu skipped), %zu triangles, %zu vertices\n",
+                   p.objects().size(), p.pointerOffsets().size(), meshes.size(), borrowed, skipped, tris, verts);
+            printf("%zu meshes with texture coordinates, %zu with a colour texture; pack lends %zu buffer sets and borrows %zu\n", withUv,
+                   withTex, p.geometryExports().size(), p.geometryImports().size());
             return 0;
         }
         fprintf(stderr, "unknown command\n");

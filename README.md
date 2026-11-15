@@ -44,8 +44,8 @@ Host tools and tests (Linux, needs CMake, Ninja and zlib):
 2. Tap **Choose game folder** and pick the folder that holds your copy of the game.
 3. Wait for the one-time import (about 1 GB is copied).
 4. Use the Pack and Texture buttons to browse textures.
-5. Tap **World** to see a city sector's static geometry. Drag to turn, pinch to zoom, and use the Pack
-   buttons to change sector.
+5. Tap **World** to see a city sector in full detail, in its place in the city. Drag to turn, pinch to
+   zoom, and use the Pack buttons to change sector. **City** shows the whole city from far away.
 
 ## Licence
 
