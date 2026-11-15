@@ -11,7 +11,9 @@ Last updated: 2026-11-15. Tested against the EU disc release (BCES00220).
 | Textures | All 15,437 descriptors parsed (3,869 distinct names); DXT1, DXT5 and ARGB8 decode to RGBA8 |
 | Object model | Directory, class ids, object names and pointer fixups decoded: about 123,000 objects in 159 classes |
 | Android app | Run on a Galaxy S23: import works and textures display correctly |
-| Static world geometry | Sector meshes decode (positions and triangles); 187 of 199 in sector A1. Vertex size found by a bounding-box check, not yet read from the data |
+| Static world geometry | Sector meshes decode (positions, triangles, texture coordinates); 187 of 199 in sector A1. Vertex sizes are found by checks on the data, not yet read from the record |
+| Materials | Texture slots of the common material class; colour maps resolve to textures in the sector or the shared pack |
+| World viewer, untextured | Run on a Galaxy S23: geometry and camera work |
 | Rigid model geometry | Packed positions decode for rigid pieces (checked by eye on a weapon) |
 | Host tool | `ina_tool` lists archives, summarises packs, writes textures as PNG |
 | Unit tests | Archive, pack and texture decoders, on synthetic data; run in CI |
@@ -27,7 +29,7 @@ Last updated: 2026-11-15. Tested against the EU disc release (BCES00220).
 
 | Area | State |
 |---|---|
-| World viewer | Shows one sector's static meshes, untextured, with a touch orbit camera |
+| World viewer, textured | Draws a sector's static meshes with their colour maps |
 
 ## Not started
 
@@ -38,7 +40,8 @@ scripts and mission logic, physics, AI, audio, input, save data, touch controls,
 
 - Only the EU disc release has been examined. Other releases may differ.
 - The texture viewer shows the largest mip level of the first face only.
-- The world viewer draws one sector at a time, without textures, culling or streaming.
+- The world viewer draws one sector at a time with colour maps only: no normal or specular maps, real lighting, culling or streaming.
+- The shared pack (138 MB) is held in memory whole.
 - Textures are decoded to RGBA8 on the CPU each time one is shown. Conversion to ASTC or ETC2 at import
   is not written.
 
@@ -48,7 +51,7 @@ None yet. No figure will be reported here until it has been measured on a device
 
 ## Next
 
-1. Run the world viewer on a device.
-2. Texture coordinates and materials for static meshes, so sectors can be drawn textured.
-3. Find how shared models are placed in a sector, to fill in the buildings.
+1. Run the textured world viewer on a device.
+2. Find how shared models are placed in a sector, to fill in the buildings.
+3. Several sectors at once, with culling and streaming.
 4. Solve the scale and offset of skinned pieces, to assemble a character.

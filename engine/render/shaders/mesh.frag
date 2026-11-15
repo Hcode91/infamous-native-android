@@ -1,12 +1,13 @@
 #version 450
+layout(set = 0, binding = 0) uniform sampler2D colorMap;
 layout(location = 0) in vec3 vNormal;
-layout(location = 1) in float vHeight;
+layout(location = 1) in vec2 vUv;
 layout(location = 0) out vec4 color;
 void main() {
-    // Untextured preview shading: a fixed sun, two-sided, plus a little sky light from above.
+    // Preview shading: colour map times a fixed sun (two-sided) plus a little sky light from above.
+    vec4 t = texture(colorMap, vUv);
     vec3 n = normalize(vNormal);
     float sun = abs(dot(n, normalize(vec3(0.35, 0.45, 0.82))));
     float sky = 0.5 + 0.5 * n.z;
-    vec3 base = vec3(0.74, 0.72, 0.68);
-    color = vec4(base * (0.18 + 0.62 * sun + 0.20 * sky), 1.0);
+    color = vec4(t.rgb * (0.25 + 0.60 * sun + 0.25 * sky), 1.0);
 }

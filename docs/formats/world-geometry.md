@@ -26,6 +26,16 @@ The sector packs (`A1.xpp` … `C24.xpp`) hold uncompressed meshes. Each mesh ha
   follow (one case seen: two half-floats that look like texture coordinates).
 - A second stream, when present, holds half-float vectors (normals in the case examined).
 
+**Texture coordinates** are two half-floats per vertex. When the mesh has a single wide stream they are its
+last four bytes. Otherwise they are 8 bytes into the second stream, whose vertex is 14 bytes (two packed
+32-bit vectors, then three half-floats) or 18 bytes (the same plus four bytes).
+
+**Materials.** The record's material pointer leads to a shader object. Its word 8 points at an array of
+texture entries and word 9 is their count. An entry is 7 words: texture object id, 0, a pointer back to the
+material, `slot << 24 | 0x101`, sampler state, 0, 0. In the materials examined, slot 0 is the colour map,
+1 a decal colour map, 3 the normal map and 4 the specular map. Textures are found by object id in the
+sector's own pack or in the shared pack `core.xpp`.
+
 **Verified** on sector `A1`: 199 records found, and in every one the highest index equals the vertex count
 minus one. Drawn untextured, the result is recognisable architecture (columns, a stepped plinth, a tower).
 
@@ -33,8 +43,13 @@ minus one. Drawn untextured, the result is recognisable architecture (columns, a
 12, 16, 20 and 24 bytes and accepts the first for which every position lies inside the record's bounding
 box. In `A1` this decodes 187 of 199 meshes; the other 12 are skipped.
 
-**Not known:** the format word, the layout of the other streams, how materials and textures attach, and
-where placed copies of shared models (most buildings) are listed.
+The same heuristic applies to the second stream: 14 or 18 bytes is chosen by the space the stream occupies
+and by whether the values read as plausible coordinates. In `A1`, 175 of the 187 decoded meshes get
+texture coordinates, 133 have a colour map, and all 53 textures they name were found. Checked by eye on a
+sign (its face maps onto the whole sign texture) and by a rough software render of the sector.
+
+**Not known:** the format word and flags, the packed vectors, materials of other shader classes, and where
+placed copies of shared models (most buildings) are listed.
 
 ## Compressed model geometry (characters, props, weapons)
 

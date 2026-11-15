@@ -1,6 +1,7 @@
 #include "assets/world_mesh.h"
 #include "core/bytes.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -15,12 +16,58 @@ float f32(const uint8_t* p) {
     return f;
 }
 
+float half(const uint8_t* p) {
+    const uint32_t h = uint32_t(p[0]) << 8 | p[1];
+    const uint32_t sign = h >> 15, exp = (h >> 10) & 31, man = h & 1023;
+    float v;
+    if (exp == 0) v = std::ldexp(float(man), -24);
+    else if (exp == 31) v = man ? NAN : INFINITY;
+    else v = std::ldexp(float(man | 1024), int(exp) - 25);
+    return sign ? -v : v;
+}
+
+// Reads `count` (u, v) pairs of half-floats; false when any value is not a plausible texture coordinate.
+bool readUvs(std::span<const uint8_t> data, size_t base, uint32_t stride, uint32_t offset, uint32_t count, std::vector<float>& out) {
+    if (base > data.size() || size_t(count) * stride > data.size() - base) return false;
+    out.resize(size_t(count) * 2);
+    for (uint32_t v = 0; v < count; v++) {
+        const uint8_t* p = data.data() + base + size_t(v) * stride + offset;
+        const float a = half(p), b = half(p + 2);
+        if (!(std::fabs(a) < 200.0f && std::fabs(b) < 200.0f)) return false;   // also rejects NaN and infinity
+        out[size_t(v) * 2] = a;
+        out[size_t(v) * 2 + 1] = b;
+    }
+    return true;
+}
+
 }  // namespace
+
+std::vector<std::pair<uint32_t, uint32_t>> readMaterialTextures(const Pack& pack, uint32_t materialOffset) {
+    // Material object: word 8 points at its texture entries and word 9 is their count. An entry is 7 words:
+    // texture object id, 0, pointer back to the material, slot << 24 | 0x101, sampler state, 0, 0.
+    std::vector<std::pair<uint32_t, uint32_t>> out;
+    const auto data = pack.data();
+    if (size_t(materialOffset) + 40 > data.size() || !pack.isPointer(size_t(materialOffset) + 32)) return out;
+    const uint32_t entries = pack.word(size_t(materialOffset) + 32), count = pack.word(size_t(materialOffset) + 36);
+    if (count > 16 || entries > data.size() || size_t(count) * 28 > data.size() - entries) return out;
+    for (uint32_t i = 0; i < count; i++) {
+        const size_t e = size_t(entries) + size_t(i) * 28;
+        const uint32_t flags = pack.word(e + 12);
+        if (pack.word(e + 8) != materialOffset || (flags & 0xFFFFFF) != 0x101) continue;
+        out.emplace_back(flags >> 24, pack.word(e));
+    }
+    return out;
+}
 
 std::vector<StaticMesh> readStaticMeshes(const Pack& pack, size_t* skipped) {
     std::vector<StaticMesh> out;
     if (skipped) *skipped = 0;
     const auto data = pack.data();
+    // Sorted pointer targets: the distance to the next one bounds the size of a vertex stream.
+    std::vector<uint32_t> targets;
+    for (uint32_t at : pack.pointerOffsets()) targets.push_back(pack.word(at));
+    std::sort(targets.begin(), targets.end());
+    targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
     // A record is 0x60 bytes. Its first stream slot (a pointer stored twice) is at +0x34, so every pointer
     // word that is followed by another pointer is a candidate; the rest of the layout is then checked.
     for (uint32_t at : pack.pointerOffsets()) {
@@ -83,6 +130,25 @@ std::vector<StaticMesh> readStaticMeshes(const Pack& pack, size_t* skipped) {
         if (m.vertexStride == 0) {
             if (skipped) ++*skipped;
             continue;
+        }
+        // Texture coordinates are two half-floats. With a single wide stream they are its last four bytes;
+        // otherwise they sit 8 bytes into the second stream, whose vertex size (14 or 18) is not read from
+        // the record yet and is chosen by the space the stream occupies.
+        if (m.vertexStride > 12) {
+            if (!readUvs(data, f[13], m.vertexStride, m.vertexStride - 4, vertices, m.uvs)) m.uvs.clear();
+        } else if (f[15] == f[16] && f[15] != 0) {
+            const auto next = std::upper_bound(targets.begin(), targets.end(), f[15]);
+            const size_t room = (next == targets.end() ? data.size() : *next) - f[15];
+            for (uint32_t stride : {14u, 18u}) {
+                const size_t need = size_t(vertices) * stride;
+                if (need > room || room >= need + 160) continue;
+                if (readUvs(data, f[15], stride, 8, vertices, m.uvs)) break;
+                m.uvs.clear();
+            }
+        }
+        for (const auto& [slot, oid] : readMaterialTextures(pack, m.materialOffset)) {
+            if (slot == 0) { m.colorTextureOid = oid; break; }
+            if (slot == 1 && m.colorTextureOid == 0) m.colorTextureOid = oid;
         }
         out.push_back(std::move(m));
     }

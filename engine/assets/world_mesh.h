@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace ina {
@@ -15,8 +16,14 @@ struct StaticMesh {
     std::array<float, 3> boxMin{}, boxMax{};
     uint32_t vertexStride = 0;            // bytes per vertex in the position stream
     std::vector<float> positions;         // x, y, z per vertex, in the game's world units (z is up)
+    std::vector<float> uvs;               // u, v per vertex; empty when the layout was not recognised
     std::vector<uint32_t> indices;        // triangle list
+    uint32_t colorTextureOid = 0;         // the material's colour texture (0 when it has none)
 };
+
+// Texture slots of a material object: slot number -> texture object id. Slot 0 is the colour map, 1 a decal
+// colour map, 3 the normal map and 4 the specular map in the materials examined.
+std::vector<std::pair<uint32_t, uint32_t>> readMaterialTextures(const Pack& pack, uint32_t materialOffset);
 
 // Finds and decodes every static mesh record in a pack. Records whose vertex layout cannot be confirmed
 // are skipped and counted in `skipped` when it is given.

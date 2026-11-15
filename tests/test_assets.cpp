@@ -229,13 +229,17 @@ int main() {
     }
     // Static world mesh: one record with a 16-byte vertex (position + two extra halves), two triangles.
     {
-        const uint32_t recAt = 0x100, vbAt = 0x200, ibAt = 0x300, matAt = 0x20;
+        const uint32_t recAt = 0x100, vbAt = 0x200, ibAt = 0x300, matAt = 0x20, entAt = 0x60;
         std::vector<uint8_t> r0(0x400, 0);
         auto put = [&](size_t o, uint32_t v) { r0[o] = uint8_t(v >> 24); r0[o + 1] = uint8_t(v >> 16); r0[o + 2] = uint8_t(v >> 8); r0[o + 3] = uint8_t(v); };
         auto putf = [&](size_t o, float f) { uint32_t u; memcpy(&u, &f, 4); put(o, u); };
         put(recAt, 77);                        // name
         put(recAt + 4, 2u << 16 | 3);          // two triangles
         put(recAt + 8, matAt);
+        // material: word 8 -> texture entries, word 9 = count; one normal map (slot 3) and one colour map (slot 0)
+        put(matAt + 32, entAt); put(matAt + 36, 2);
+        put(entAt, 555); put(entAt + 8, matAt); put(entAt + 12, 3u << 24 | 0x101);
+        put(entAt + 28, 444); put(entAt + 36, matAt); put(entAt + 40, 0x101);
         const float box[6] = {0, 0, 0, 10, 20, 30};
         for (int i = 0; i < 6; i++) putf(recAt + 0x10 + size_t(i) * 4, box[i]);
         put(recAt + 0x34, vbAt); put(recAt + 0x38, vbAt);
@@ -251,7 +255,8 @@ int main() {
         const uint16_t idx[6] = {0, 1, 2, 0, 2, 3};
         for (int i = 0; i < 6; i++) { r0[ibAt + size_t(i) * 2] = uint8_t(idx[i] >> 8); r0[ibAt + size_t(i) * 2 + 1] = uint8_t(idx[i]); }
         auto w = [](uint32_t off) { return uint16_t(off / 4); };
-        const std::vector<uint8_t> fix = makeFixups({0xC000, w(recAt + 8), w(recAt + 0x34), w(recAt + 0x38), w(recAt + 0x4C), w(recAt + 0x50)});
+        const std::vector<uint8_t> fix = makeFixups({0xC000, w(matAt + 32), w(entAt + 8), w(entAt + 36), w(recAt + 8), w(recAt + 0x34),
+                                                     w(recAt + 0x38), w(recAt + 0x4C), w(recAt + 0x50)});
         std::vector<uint8_t> dir;
         be32(dir, 0); be32(dir, 0);
         const std::vector<uint8_t> file = makePackFromSegments({{1, 0x10, r0}, {6, 4, dir}, {2, 4, fix}});
@@ -265,6 +270,12 @@ int main() {
             CHECK(m.positions.size() == 12 && m.positions[3] == 10.0f && m.positions[8] == 30.0f);
             CHECK(m.indices.size() == 6 && m.indices[5] == 3);
             CHECK(m.boxMax[1] == 20.0f);
+            CHECK(m.uvs.size() == 8 && m.uvs[0] == 1.0f && m.uvs[7] == 1.0f);   // half 0x3C00 is 1.0
+            CHECK(m.colorTextureOid == 444);
+        }
+        const auto slots = readMaterialTextures(p, matAt);
+        CHECK(slots.size() == 2 && slots[0].first == 3 && slots[0].second == 555);
+        {
         }
     }
     (void)bef;

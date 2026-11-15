@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -44,9 +45,16 @@ struct State {
     // handed to the render thread
     Image pending;
     bool hasPending = false;
-    std::vector<float> meshVertices;         // position xyz + normal xyz
+    std::vector<float> meshVertices;         // position xyz, normal xyz, uv
     std::vector<uint32_t> meshIndices;
+    std::vector<VkRenderer::Batch> meshBatches;
+    std::vector<VkRenderer::SceneTexture> meshTextures;
     bool hasPendingMesh = false;
+
+    // the shared pack: most world textures live here
+    std::vector<uint8_t> coreBytes;
+    std::unique_ptr<Pack> core;
+    std::map<uint32_t, TextureInfo> coreTextures;
 
     // world viewer
     std::vector<size_t> sectors;             // indexes into `packs` of the city sector packs
@@ -120,20 +128,24 @@ void renderLoop() {
         {
             std::vector<float> mv;
             std::vector<uint32_t> mi;
+            std::vector<VkRenderer::Batch> mb;
+            std::vector<VkRenderer::SceneTexture> mt;
             bool haveMesh = false;
             float target[3], yaw, pitch, distance;
             {
                 std::lock_guard<std::mutex> l(g.lock);
-                if (g.hasPendingMesh) {   // copied, not moved: a new surface needs the mesh again
+                if (g.hasPendingMesh) {   // copied, not moved: a new surface needs the scene again
                     mv = g.meshVertices;
                     mi = g.meshIndices;
+                    mb = g.meshBatches;
+                    mt = g.meshTextures;
                     g.hasPendingMesh = false;
                     haveMesh = true;
                 }
                 target[0] = g.target[0]; target[1] = g.target[1]; target[2] = g.target[2];
                 yaw = g.yaw; pitch = g.pitch; distance = g.distance;
             }
-            if (haveMesh) r.setMesh(mv, mi);
+            if (haveMesh) r.setScene(mv, mi, mb, mt);
             r.setCamera(target, yaw, pitch, distance);
         }
         if (!r.drawFrame()) {
@@ -175,6 +187,18 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_open(JNIEnv* env, jc
         for (std::string line; std::getline(in, line);) {
             if (!line.empty() && line.back() == '\r') line.pop_back();
             g.names.push_back(line);
+        }
+        g.core.reset();
+        g.coreTextures.clear();
+        g.coreBytes.clear();
+        for (auto& a : g.archives) {
+            const int ci = a->find("core.xpp");
+            if (ci < 0) continue;
+            g.coreBytes = a->read(size_t(ci));
+            g.core = std::make_unique<Pack>(g.coreBytes);
+            for (const TextureInfo& t : g.core->textures())
+                if (t.format != PixelFormat::Unknown && !t.cube) g.coreTextures[t.oid] = t;
+            break;
         }
         g.sectors.clear();
         for (size_t i = 0; i < g.packs.size(); i++) {
@@ -243,8 +267,49 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_world(JNIEnv* env, j
         std::vector<float> verts;
         std::vector<uint32_t> idx;
         std::vector<float> cx, cy, cz;
-        for (const StaticMesh& m : meshes) {
-            const uint32_t base = uint32_t(verts.size() / 6);
+        // Textures: the sector's own first, then the shared pack. Largest level drawn is 512 texels.
+        std::map<uint32_t, TextureInfo> local;
+        for (const TextureInfo& t : p.textures())
+            if (t.format != PixelFormat::Unknown && !t.cube) local[t.oid] = t;
+        std::map<uint32_t, uint32_t> slotOf;   // texture oid -> index in `textures`
+        std::vector<VkRenderer::SceneTexture> textures;
+        size_t missing = 0;
+        auto textureFor = [&](uint32_t oid) -> uint32_t {
+            if (oid == 0) return 0xFFFFFFFFu;
+            const auto known = slotOf.find(oid);
+            if (known != slotOf.end()) return known->second;
+            const Pack* from = &p;
+            const TextureInfo* info = nullptr;
+            if (const auto it = local.find(oid); it != local.end()) info = &it->second;
+            else if (const auto ic = g.coreTextures.find(oid); ic != g.coreTextures.end() && g.core) { info = &ic->second; from = g.core.get(); }
+            uint32_t slot = 0xFFFFFFFFu;
+            if (info && textures.size() < 500) {
+                try {
+                    uint32_t first = 0;
+                    while (first + 1 < std::max(1u, info->mips) && std::max(info->width, info->height) >> first > 512) first++;
+                    VkRenderer::SceneTexture st;
+                    st.width = std::max(1u, info->width >> first);
+                    st.height = std::max(1u, info->height >> first);
+                    for (uint32_t m = first; m < std::max(1u, info->mips); m++) st.levels.push_back(decodeTexture(*from, *info, 0, m).rgba);
+                    slot = uint32_t(textures.size());
+                    textures.push_back(std::move(st));
+                } catch (const std::exception&) {
+                    slot = 0xFFFFFFFFu;
+                }
+            } else if (!info) {
+                missing++;
+            }
+            slotOf[oid] = slot;
+            return slot;
+        };
+        // Draw order: grouped by texture so each texture is bound once.
+        std::vector<std::pair<uint32_t, const StaticMesh*>> order;
+        for (const StaticMesh& m : meshes) order.emplace_back(m.uvs.empty() ? 0xFFFFFFFFu : textureFor(m.colorTextureOid), &m);
+        std::stable_sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        std::vector<VkRenderer::Batch> batches;
+        for (const auto& [tex, mp] : order) {
+            const StaticMesh& m = *mp;
+            const uint32_t base = uint32_t(verts.size() / 8);
             const size_t nv = m.positions.size() / 3;
             std::vector<float> normal(nv * 3, 0.0f);
             for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
@@ -257,14 +322,16 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_world(JNIEnv* env, j
                     for (int c2 = 0; c2 < 3; c2++) normal[m.indices[t + k] * 3 + c2] += fn[c2];
             }
             for (size_t v = 0; v < nv; v++) {
-                float* nn = &normal[v * 3];
+                const float* nn = &normal[v * 3];
                 const float len = std::sqrt(nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]);
-                for (int c2 = 0; c2 < 3; c2++) {
-                    verts.push_back(m.positions[v * 3 + c2]);
-                }
+                for (int c2 = 0; c2 < 3; c2++) verts.push_back(m.positions[v * 3 + c2]);
                 for (int c2 = 0; c2 < 3; c2++) verts.push_back(len > 0 ? nn[c2] / len : (c2 == 2 ? 1.0f : 0.0f));
+                verts.push_back(m.uvs.empty() ? 0.0f : m.uvs[v * 2]);
+                verts.push_back(m.uvs.empty() ? 0.0f : m.uvs[v * 2 + 1]);
             }
+            if (batches.empty() || batches.back().texture != tex) batches.push_back({uint32_t(idx.size()), 0, tex});
             for (uint32_t i : m.indices) idx.push_back(base + i);
+            batches.back().indexCount += uint32_t(m.indices.size());
             cx.push_back(0.5f * (m.boxMin[0] + m.boxMax[0]));
             cy.push_back(0.5f * (m.boxMin[1] + m.boxMax[1]));
             cz.push_back(0.5f * (m.boxMin[2] + m.boxMax[2]));
@@ -282,13 +349,17 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_world(JNIEnv* env, j
             g.distance = std::max(20.0f, d[d.size() * 3 / 4] * 2.5f);
         }
         const size_t tris = idx.size() / 3;
+        const size_t textureCount = textures.size();
         g.meshVertices = std::move(verts);
         g.meshIndices = std::move(idx);
+        g.meshBatches = std::move(batches);
+        g.meshTextures = std::move(textures);
         g.hasPendingMesh = true;
         g.sectorShown = true;
         msg = name + "  (sector " + std::to_string(g.sector + 1) + " of " + std::to_string(g.sectors.size()) + ")\n" +
               std::to_string(meshes.size()) + " static meshes, " + std::to_string(tris) + " triangles" +
-              (skipped ? ", " + std::to_string(skipped) + " meshes not decoded" : "") + "\nDrag to turn, pinch to zoom. Untextured preview.";
+              (skipped ? ", " + std::to_string(skipped) + " meshes not decoded" : "") + "\n" + std::to_string(textureCount) + " textures" +
+              (missing ? ", " + std::to_string(missing) + " not found" : "") + ". Drag to turn, pinch to zoom.";
     } catch (const std::exception& e) {
         msg = std::string("ERROR ") + e.what();
     }
@@ -300,6 +371,8 @@ JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_hideWorld(JNIEnv*, jcla
     std::lock_guard<std::mutex> l(g.lock);
     g.meshVertices.clear();
     g.meshIndices.clear();
+    g.meshBatches.clear();
+    g.meshTextures.clear();
     g.hasPendingMesh = true;
     g.sectorShown = false;
 }

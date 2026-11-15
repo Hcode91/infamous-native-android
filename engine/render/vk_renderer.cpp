@@ -20,6 +20,10 @@
 
 namespace ina {
 
+namespace {
+constexpr uint32_t kMaxSets = 600;   // one per scene texture, plus the image quad and the grey fallback
+}
+
 VkRenderer::~VkRenderer() { shutdown(); }
 
 bool VkRenderer::fail(const char* what, VkResult r) {
@@ -257,6 +261,8 @@ bool VkRenderer::init(ANativeWindow* window) {
     // Mesh pipeline: position + normal vertices, one matrix as a push constant, depth tested, two-sided.
     VkPushConstantRange mpc{VK_SHADER_STAGE_VERTEX_BIT, 0, 64};
     VkPipelineLayoutCreateInfo mli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    mli.setLayoutCount = 1;
+    mli.pSetLayouts = &setLayout_;
     mli.pushConstantRangeCount = 1;
     mli.pPushConstantRanges = &mpc;
     if ((r = vkCreatePipelineLayout(dev_, &mli, nullptr, &meshLayout_)) != VK_SUCCESS) return fail("mesh pipeline layout", r);
@@ -271,12 +277,13 @@ bool VkRenderer::init(ANativeWindow* window) {
     }
     stages[0].module = vs;
     stages[1].module = fs;
-    const VkVertexInputBindingDescription vbind{0, 24, VK_VERTEX_INPUT_RATE_VERTEX};
-    const VkVertexInputAttributeDescription vattr[2] = {{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12}};
+    const VkVertexInputBindingDescription vbind{0, 32, VK_VERTEX_INPUT_RATE_VERTEX};
+    const VkVertexInputAttributeDescription vattr[3] = {{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12},
+                                                         {2, 0, VK_FORMAT_R32G32_SFLOAT, 24}};
     VkPipelineVertexInputStateCreateInfo mvi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     mvi.vertexBindingDescriptionCount = 1;
     mvi.pVertexBindingDescriptions = &vbind;
-    mvi.vertexAttributeDescriptionCount = 2;
+    mvi.vertexAttributeDescriptionCount = 3;
     mvi.pVertexAttributeDescriptions = vattr;
     ds.depthTestEnable = VK_TRUE;
     ds.depthWriteEnable = VK_TRUE;
@@ -287,9 +294,10 @@ bool VkRenderer::init(ANativeWindow* window) {
     vkDestroyShaderModule(dev_, fs, nullptr);
     if (r != VK_SUCCESS) return fail("mesh pipeline", r);
 
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxSets};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpi.maxSets = 1;
+    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpi.maxSets = kMaxSets;
     dpi.poolSizeCount = 1;
     dpi.pPoolSizes = &ps;
     if ((r = vkCreateDescriptorPool(dev_, &dpi, nullptr, &descPool_)) != VK_SUCCESS) return fail("vkCreateDescriptorPool", r);
@@ -304,6 +312,13 @@ bool VkRenderer::init(ANativeWindow* window) {
     sai.minFilter = VK_FILTER_LINEAR;
     sai.addressModeU = sai.addressModeV = sai.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if ((r = vkCreateSampler(dev_, &sai, nullptr, &sampler_)) != VK_SUCCESS) return fail("vkCreateSampler", r);
+
+    sai.magFilter = VK_FILTER_LINEAR;
+    sai.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sai.addressModeU = sai.addressModeV = sai.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sai.maxLod = VK_LOD_CLAMP_NONE;
+    if ((r = vkCreateSampler(dev_, &sai, nullptr, &repeatSampler_)) != VK_SUCCESS) return fail("repeat sampler", r);
+    if (!uploadTexture(1, 1, {{188, 184, 174, 255}}, repeatSampler_, &greyTexture_)) return false;
 
     if (!createSwapchain()) return false;
     // Start with a 1x1 dark texel so the descriptor is always valid.
@@ -450,16 +465,165 @@ bool VkRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, const
     return true;
 }
 
-bool VkRenderer::setMesh(const std::vector<float>& vertices, const std::vector<uint32_t>& indices) {
+void VkRenderer::destroyGpuTexture(GpuTexture& t) {
+    if (!dev_) return;
+    if (t.set) vkFreeDescriptorSets(dev_, descPool_, 1, &t.set);
+    if (t.view) vkDestroyImageView(dev_, t.view, nullptr);
+    if (t.image) vkDestroyImage(dev_, t.image, nullptr);
+    if (t.memory) vkFreeMemory(dev_, t.memory, nullptr);
+    t = GpuTexture{};
+}
+
+// Creates an RGBA8 texture with the given mip levels and a descriptor set that samples it.
+bool VkRenderer::uploadTexture(uint32_t w, uint32_t h, const std::vector<std::vector<uint8_t>>& levels, VkSampler sampler, GpuTexture* out) {
+    VkResult r;
+    if (levels.empty() || w == 0 || h == 0) return false;
+    VkDeviceSize total = 0;
+    for (size_t m = 0; m < levels.size(); m++) {
+        const VkDeviceSize need = VkDeviceSize(std::max(1u, w >> m)) * std::max(1u, h >> m) * 4;
+        if (levels[m].size() < need) return false;
+        total += need;
+    }
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = total;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    if ((r = vkCreateBuffer(dev_, &bci, nullptr, &staging)) != VK_SUCCESS) return fail("texture staging buffer", r);
+    VkMemoryRequirements mr;
+    vkGetBufferMemoryRequirements(dev_, staging, &mr);
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = memoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    auto dropStaging = [&] {
+        vkDestroyBuffer(dev_, staging, nullptr);
+        if (stagingMem) vkFreeMemory(dev_, stagingMem, nullptr);
+    };
+    if (mai.memoryTypeIndex == UINT32_MAX || (r = vkAllocateMemory(dev_, &mai, nullptr, &stagingMem)) != VK_SUCCESS) {
+        dropStaging();
+        return fail("texture staging memory", VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    }
+    vkBindBufferMemory(dev_, staging, stagingMem, 0);
+    void* p = nullptr;
+    vkMapMemory(dev_, stagingMem, 0, total, 0, &p);
+    std::vector<VkBufferImageCopy> copies;
+    VkDeviceSize off = 0;
+    for (size_t m = 0; m < levels.size(); m++) {
+        const uint32_t mw = std::max(1u, w >> m), mh = std::max(1u, h >> m);
+        memcpy(static_cast<uint8_t*>(p) + off, levels[m].data(), size_t(mw) * mh * 4);
+        VkBufferImageCopy c{};
+        c.bufferOffset = off;
+        c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, uint32_t(m), 0, 1};
+        c.imageExtent = {mw, mh, 1};
+        copies.push_back(c);
+        off += VkDeviceSize(mw) * mh * 4;
+    }
+    vkUnmapMemory(dev_, stagingMem);
+
+    GpuTexture t;
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.extent = {w, h, 1};
+    ici.mipLevels = uint32_t(levels.size());
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if ((r = vkCreateImage(dev_, &ici, nullptr, &t.image)) != VK_SUCCESS) {
+        dropStaging();
+        return fail("scene texture image", r);
+    }
+    vkGetImageMemoryRequirements(dev_, t.image, &mr);
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = memoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (mai.memoryTypeIndex == UINT32_MAX || (r = vkAllocateMemory(dev_, &mai, nullptr, &t.memory)) != VK_SUCCESS) {
+        dropStaging();
+        destroyGpuTexture(t);
+        return fail("scene texture memory", VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    }
+    vkBindImageMemory(dev_, t.image, t.memory, 0);
+
+    vkResetCommandBuffer(cmd_, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd_, &bi);
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = t.image;
+    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, uint32_t(levels.size()), 0, 1};
+    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    vkCmdCopyBufferToImage(cmd_, staging, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, uint32_t(copies.size()), copies.data());
+    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    vkEndCommandBuffer(cmd_);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd_;
+    r = vkQueueSubmit(queue_, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue_);
+    dropStaging();
+    if (r != VK_SUCCESS) {
+        destroyGpuTexture(t);
+        return fail("scene texture upload", r);
+    }
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = t.image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, uint32_t(levels.size()), 0, 1};
+    if ((r = vkCreateImageView(dev_, &vci, nullptr, &t.view)) != VK_SUCCESS) {
+        destroyGpuTexture(t);
+        return fail("scene texture view", r);
+    }
+    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dai.descriptorPool = descPool_;
+    dai.descriptorSetCount = 1;
+    dai.pSetLayouts = &setLayout_;
+    if ((r = vkAllocateDescriptorSets(dev_, &dai, &t.set)) != VK_SUCCESS) {
+        t.set = VK_NULL_HANDLE;
+        destroyGpuTexture(t);
+        return fail("scene texture descriptor", r);
+    }
+    VkDescriptorImageInfo dii{sampler, t.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    wr.dstSet = t.set;
+    wr.dstBinding = 0;
+    wr.descriptorCount = 1;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.pImageInfo = &dii;
+    vkUpdateDescriptorSets(dev_, 1, &wr, 0, nullptr);
+    *out = t;
+    return true;
+}
+
+bool VkRenderer::setScene(const std::vector<float>& vertices, const std::vector<uint32_t>& indices, const std::vector<Batch>& batches,
+                          const std::vector<SceneTexture>& textures) {
     if (!dev_) return false;
     vkDeviceWaitIdle(dev_);
     destroyMesh();
-    if (vertices.empty() || indices.empty()) return true;
+    for (GpuTexture& t : sceneTextures_) destroyGpuTexture(t);
+    sceneTextures_.clear();
+    batches_.clear();
+    if (vertices.empty() || indices.empty() || batches.empty()) return true;
     if (!createBuffer(vertices.size() * sizeof(float), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices.data(), &vbuf_, &vmem_) ||
         !createBuffer(indices.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data(), &ibuf_, &imem_)) {
         destroyMesh();
         return false;
     }
+    // A texture that cannot be created is replaced by grey: the scene still draws.
+    for (size_t i = 0; i < textures.size() && i + 8 < kMaxSets; i++) {
+        GpuTexture t;
+        if (!uploadTexture(textures[i].width, textures[i].height, textures[i].levels, repeatSampler_, &t)) t = GpuTexture{};
+        sceneTextures_.push_back(t);
+    }
+    batches_ = batches;
     indexCount_ = uint32_t(indices.size());
     return true;
 }
@@ -649,7 +813,13 @@ bool VkRenderer::drawFrame() {
         const VkDeviceSize zero = 0;
         vkCmdBindVertexBuffers(cmd_, 0, 1, &vbuf_, &zero);
         vkCmdBindIndexBuffer(cmd_, ibuf_, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(cmd_, indexCount_, 1, 0, 0, 0);
+        for (const Batch& b : batches_) {
+            VkDescriptorSet set = greyTexture_.set;
+            if (b.texture < sceneTextures_.size() && sceneTextures_[b.texture].set) set = sceneTextures_[b.texture].set;
+            vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, meshLayout_, 0, 1, &set, 0, nullptr);
+            if (b.firstIndex < indexCount_ && b.indexCount <= indexCount_ - b.firstIndex)
+                vkCmdDrawIndexed(cmd_, b.indexCount, 1, b.firstIndex, 0, 0);
+        }
     } else {
         vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
         vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set_, 0, nullptr);
@@ -695,6 +865,11 @@ void VkRenderer::shutdown() {
         destroySwapchain();
         destroyTexture();
         destroyMesh();
+        for (GpuTexture& t : sceneTextures_) destroyGpuTexture(t);
+        sceneTextures_.clear();
+        destroyGpuTexture(greyTexture_);
+        if (repeatSampler_) vkDestroySampler(dev_, repeatSampler_, nullptr);
+        repeatSampler_ = VK_NULL_HANDLE;
         if (meshPipeline_) vkDestroyPipeline(dev_, meshPipeline_, nullptr);
         if (meshLayout_) vkDestroyPipelineLayout(dev_, meshLayout_, nullptr);
         meshPipeline_ = VK_NULL_HANDLE;

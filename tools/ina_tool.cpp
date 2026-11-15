@@ -111,13 +111,15 @@ int main(int argc, char** argv) {
             }
             const auto bytes = arc.read(size_t(idx));
             Pack p(bytes);
-            size_t skipped = 0, tris = 0, verts = 0;
+            size_t skipped = 0, tris = 0, verts = 0, withUv = 0, withTex = 0;
             const auto meshes = readStaticMeshes(p, &skipped);
             FILE* obj = argc > 4 ? fopen(argv[4], "w") : nullptr;
             size_t base = 1;
             for (const auto& m : meshes) {
                 tris += m.indices.size() / 3;
                 verts += m.positions.size() / 3;
+                withUv += !m.uvs.empty();
+                withTex += m.colorTextureOid != 0;
                 if (!obj) continue;
                 for (size_t v = 0; v < m.positions.size(); v += 3)
                     fprintf(obj, "v %g %g %g\n", m.positions[v], m.positions[v + 1], m.positions[v + 2]);
@@ -128,6 +130,7 @@ int main(int argc, char** argv) {
             if (obj) fclose(obj);
             printf("%zu objects, %zu pointer words, %zu static meshes (%zu skipped), %zu triangles, %zu vertices\n",
                    p.objects().size(), p.pointerOffsets().size(), meshes.size(), skipped, tris, verts);
+            printf("%zu meshes with texture coordinates, %zu with a colour texture\n", withUv, withTex);
             return 0;
         }
         fprintf(stderr, "unknown command\n");

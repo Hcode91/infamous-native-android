@@ -18,9 +18,18 @@ public:
     bool init(ANativeWindow* window);
     void shutdown();
     bool setImage(uint32_t width, uint32_t height, const std::vector<uint8_t>& rgba);
-    // Replaces the mesh. `vertices` holds position xyz then normal xyz per vertex. While a mesh is set it is
-    // drawn instead of the image; an empty mesh goes back to the image.
-    bool setMesh(const std::vector<float>& vertices, const std::vector<uint32_t>& indices);
+    // Replaces the scene. `vertices` holds position xyz, normal xyz, uv per vertex (8 floats). Each batch
+    // draws a range of `indices` with one texture; texture 0xFFFFFFFF means plain grey. While a scene is
+    // set it is drawn instead of the image; an empty scene goes back to the image.
+    struct Batch {
+        uint32_t firstIndex = 0, indexCount = 0, texture = 0xFFFFFFFFu;
+    };
+    struct SceneTexture {
+        uint32_t width = 0, height = 0;
+        std::vector<std::vector<uint8_t>> levels;   // RGBA8, largest first, each half the size of the last
+    };
+    bool setScene(const std::vector<float>& vertices, const std::vector<uint32_t>& indices, const std::vector<Batch>& batches,
+                  const std::vector<SceneTexture>& textures);
     // Orbit camera around `target`: yaw and pitch in radians, distance in world units. Z is up.
     void setCamera(const float target[3], float yaw, float pitch, float distance);
     // Draws one frame. Returns false on an error that needs a restart; a changed surface is handled inside.
@@ -61,6 +70,18 @@ private:
     VkBuffer vbuf_ = VK_NULL_HANDLE, ibuf_ = VK_NULL_HANDLE;
     VkDeviceMemory vmem_ = VK_NULL_HANDLE, imem_ = VK_NULL_HANDLE;
     uint32_t indexCount_ = 0;
+    struct GpuTexture {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+    };
+    bool uploadTexture(uint32_t w, uint32_t h, const std::vector<std::vector<uint8_t>>& levels, VkSampler sampler, GpuTexture* out);
+    void destroyGpuTexture(GpuTexture& t);
+    std::vector<GpuTexture> sceneTextures_;
+    GpuTexture greyTexture_;
+    std::vector<Batch> batches_;
+    VkSampler repeatSampler_ = VK_NULL_HANDLE;
     float camTarget_[3] = {0, 0, 0};
     float camYaw_ = 0.6f, camPitch_ = 0.5f, camDist_ = 100.0f;
     VkDescriptorPool descPool_ = VK_NULL_HANDLE;
