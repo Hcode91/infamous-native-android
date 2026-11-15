@@ -73,6 +73,7 @@ std::vector<uint8_t> Psarc::read(size_t index) const {
 }
 
 std::vector<uint8_t> Psarc::readRaw(const Entry& e) const {
+    std::lock_guard<std::mutex> l(fileLock_);
     std::vector<uint8_t> out(e.size);
     std::vector<uint8_t> in(blockSize_);
     uint64_t done = 0, off = e.offset;

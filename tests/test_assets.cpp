@@ -4,6 +4,7 @@
 #include "assets/psarc.h"
 #include "assets/texture.h"
 #include "assets/world_mesh.h"
+#include "world/city_stream.h"
 #include "world/scene.h"
 #include "core/bytes.h"
 
@@ -486,6 +487,28 @@ int main() {
         CHECK(meshes.size() == 2 && skipped == 0);
         CHECK(layoutForEffect("deferred_normal_specular_map") && layoutForEffect("deferred_normal_specular_map")->strideB == 14);
         CHECK(!layoutForEffect("no_such_effect") && drawModeForEffect("deferred_light_spot") == DrawMode::Invisible);
+    }
+    // City layout: the nearest open-city cell at full detail, open cells within the radius at level 5;
+    // interiors (other flags) never.
+    {
+        std::vector<HexCell> cells(4);
+        const float pos[4][2] = {{0, 0}, {10500, 6062}, {0, 12124}, {300, 200}};
+        const uint32_t names[4] = {1, 2, 3, 4};
+        for (int i = 0; i < 4; i++) {
+            cells[size_t(i)].center[0] = pos[i][0];
+            cells[size_t(i)].center[1] = pos[i][1];
+            cells[size_t(i)].nameOid = names[i];
+            cells[size_t(i)].flags[1] = i == 3 ? 0u : 0x1000000u;   // the last one is an interior
+        }
+        const std::vector<std::string> nm = {"", "a1", "a2", "a3", "a100"};
+        const CityLayout layout(cells, nm);
+        auto plan = layout.plan(100, 50, 13000.0f);
+        CHECK(plan.size() == 3 && plan[0].sector == "a1" && plan[0].level == 0 && plan[1].level == 5 && plan[2].level == 5);
+        plan = layout.plan(5250, 3031, 8000.0f);   // on the edge between a1 and a2: one of them in detail
+        CHECK(plan.size() == 2 && plan[0].level == 0 && plan[1].level == 5);
+        plan = layout.plan(60000, 0, 13000.0f);    // outside the city: nothing
+        CHECK(plan.empty());
+        CHECK(layout.cell("a3") && layout.cell("a3")->center[1] == 12124.0f && !layout.cell("zz"));
     }
     (void)bef;
     printf(failures ? "%d FAILED\n" : "all tests passed\n", failures);

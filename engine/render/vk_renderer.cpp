@@ -21,7 +21,7 @@
 namespace ina {
 
 namespace {
-constexpr uint32_t kMaxSets = 600;   // one per scene texture, plus the image quad and the grey fallback
+constexpr uint32_t kMaxSets = 2000;   // one per shared texture, plus the image quad and the grey fallback
 }
 
 VkRenderer::~VkRenderer() { shutdown(); }
@@ -458,17 +458,6 @@ void VkRenderer::destroySwapchain() {
     swapchain_ = VK_NULL_HANDLE;
 }
 
-void VkRenderer::destroyMesh() {
-    if (!dev_) return;
-    if (vbuf_) vkDestroyBuffer(dev_, vbuf_, nullptr);
-    if (ibuf_) vkDestroyBuffer(dev_, ibuf_, nullptr);
-    if (vmem_) vkFreeMemory(dev_, vmem_, nullptr);
-    if (imem_) vkFreeMemory(dev_, imem_, nullptr);
-    vbuf_ = ibuf_ = VK_NULL_HANDLE;
-    vmem_ = imem_ = VK_NULL_HANDLE;
-    indexCount_ = 0;
-}
-
 bool VkRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, const void* src, VkBuffer* buf, VkDeviceMemory* mem) {
     VkResult r;
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -629,29 +618,131 @@ bool VkRenderer::uploadTexture(uint32_t w, uint32_t h, const std::vector<std::ve
     return true;
 }
 
+// The fence covers the one frame that can be in flight; once it is signalled no buffer or texture is in use.
+void VkRenderer::waitIdleFrame() {
+    if (dev_ && fence_) vkWaitForFences(dev_, 1, &fence_, VK_TRUE, UINT64_MAX);
+}
+
+void VkRenderer::destroyChunk(Chunk& ch) {
+    if (ch.vbuf) vkDestroyBuffer(dev_, ch.vbuf, nullptr);
+    if (ch.ibuf) vkDestroyBuffer(dev_, ch.ibuf, nullptr);
+    if (ch.vmem) vkFreeMemory(dev_, ch.vmem, nullptr);
+    if (ch.imem) vkFreeMemory(dev_, ch.imem, nullptr);
+    ch = Chunk{};
+}
+
+bool VkRenderer::hasTexture(uint64_t key) const { return textures_.count(key) != 0; }
+
+bool VkRenderer::addTexture(uint64_t key, const SceneTexture& t) {
+    if (!dev_ || key == 0 || textures_.count(key)) return false;
+    if (textures_.size() + 8 >= kMaxSets) return false;   // the pool is full: batches using it draw grey
+    GpuTexture g;
+    if (!uploadTexture(t.width, t.height, t.levels, repeatSampler_, &g)) return false;
+    SharedTexture& s = textures_[key];
+    s.gpu = g;
+    for (const auto& l : t.levels) s.bytes += l.size();
+    textureBytes_ += s.bytes;
+    return true;
+}
+
+std::vector<uint64_t> VkRenderer::textureKeys() const {
+    std::vector<uint64_t> out;
+    for (const auto& [k, t] : textures_) out.push_back(k);
+    return out;
+}
+
+void VkRenderer::trimTextures(size_t budgetBytes) {
+    if (textureBytes_ <= budgetBytes && textures_.size() + 64 < kMaxSets) return;
+    std::vector<std::pair<uint64_t, uint64_t>> unused;   // last used, key
+    for (const auto& [k, t] : textures_)
+        if (t.users == 0) unused.push_back({t.lastUsed, k});
+    std::sort(unused.begin(), unused.end());
+    bool waited = false;
+    for (const auto& [when, k] : unused) {
+        if (textureBytes_ <= budgetBytes && textures_.size() + 64 < kMaxSets) break;
+        if (!waited) {
+            waitIdleFrame();
+            waited = true;
+        }
+        auto it = textures_.find(k);
+        textureBytes_ -= std::min(textureBytes_, it->second.bytes);
+        destroyGpuTexture(it->second.gpu);
+        textures_.erase(it);
+    }
+}
+
+void VkRenderer::releaseTexture(uint64_t key) {
+    auto it = textures_.find(key);
+    if (it == textures_.end()) return;
+    if (it->second.users > 0) it->second.users--;
+    if (it->second.users == 0) it->second.lastUsed = ++releaseCounter_;   // kept until trimTextures needs the room
+}
+
+uint32_t VkRenderer::addChunk(const std::vector<float>& vertices, const std::vector<uint32_t>& indices, const std::vector<ChunkBatch>& batches,
+                              const float boxMin[3], const float boxMax[3]) {
+    if (!dev_ || vertices.empty() || indices.empty() || batches.empty()) return 0;
+    Chunk ch;
+    if (!createBuffer(vertices.size() * sizeof(float), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices.data(), &ch.vbuf, &ch.vmem) ||
+        !createBuffer(indices.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data(), &ch.ibuf, &ch.imem)) {
+        destroyChunk(ch);
+        return 0;
+    }
+    ch.indexCount = uint32_t(indices.size());
+    ch.batches = batches;
+    for (int k = 0; k < 3; k++) {
+        ch.boxMin[k] = boxMin[k];
+        ch.boxMax[k] = boxMax[k];
+    }
+    // Count the textures this chunk uses, once each.
+    std::vector<uint64_t> keys;
+    for (const ChunkBatch& b : batches)
+        if (b.texture && textures_.count(b.texture) && std::find(keys.begin(), keys.end(), b.texture) == keys.end()) keys.push_back(b.texture);
+    for (uint64_t k : keys) textures_[k].users++;
+    const uint32_t id = nextChunk_++;
+    chunks_[id] = std::move(ch);
+    return id;
+}
+
+void VkRenderer::removeChunk(uint32_t id) {
+    auto it = chunks_.find(id);
+    if (it == chunks_.end()) return;
+    waitIdleFrame();
+    std::vector<uint64_t> keys;
+    for (const ChunkBatch& b : it->second.batches)
+        if (b.texture && std::find(keys.begin(), keys.end(), b.texture) == keys.end()) keys.push_back(b.texture);
+    destroyChunk(it->second);
+    chunks_.erase(it);
+    for (uint64_t k : keys) releaseTexture(k);
+}
+
+void VkRenderer::setChunkVisible(uint32_t id, bool visible) {
+    auto it = chunks_.find(id);
+    if (it != chunks_.end()) it->second.visible = visible;
+}
+
+void VkRenderer::clearChunks() {
+    waitIdleFrame();
+    for (auto& [id, ch] : chunks_) destroyChunk(ch);
+    chunks_.clear();
+    for (auto& [key, t] : textures_) destroyGpuTexture(t.gpu);
+    textures_.clear();
+    textureBytes_ = 0;
+}
+
+// The single-scene form: one chunk whose textures are numbered by their position in `textures`.
 bool VkRenderer::setScene(const std::vector<float>& vertices, const std::vector<uint32_t>& indices, const std::vector<Batch>& batches,
                           const std::vector<SceneTexture>& textures) {
     if (!dev_) return false;
-    vkDeviceWaitIdle(dev_);
-    destroyMesh();
-    for (GpuTexture& t : sceneTextures_) destroyGpuTexture(t);
-    sceneTextures_.clear();
-    batches_.clear();
+    clearChunks();
     if (vertices.empty() || indices.empty() || batches.empty()) return true;
-    if (!createBuffer(vertices.size() * sizeof(float), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices.data(), &vbuf_, &vmem_) ||
-        !createBuffer(indices.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data(), &ibuf_, &imem_)) {
-        destroyMesh();
-        return false;
-    }
-    // A texture that cannot be created is replaced by grey: the scene still draws.
-    for (size_t i = 0; i < textures.size() && i + 8 < kMaxSets; i++) {
-        GpuTexture t;
-        if (!uploadTexture(textures[i].width, textures[i].height, textures[i].levels, repeatSampler_, &t)) t = GpuTexture{};
-        sceneTextures_.push_back(t);
-    }
-    batches_ = batches;
-    indexCount_ = uint32_t(indices.size());
-    return true;
+    // (the scene's textures are freed with it: clearChunks above removes everything)
+    // Keys for the scene's own textures: high bit set so they never meet the keys of streamed chunks.
+    const uint64_t base = 1ull << 63;
+    for (size_t i = 0; i < textures.size(); i++) addTexture(base + i + 1, textures[i]);
+    std::vector<ChunkBatch> cb;
+    for (const Batch& b : batches) cb.push_back({b.firstIndex, b.indexCount, b.texture == 0xFFFFFFFFu ? 0 : base + b.texture + 1, b.mode});
+    float lo[3] = {-1e30f, -1e30f, -1e30f}, hi[3] = {1e30f, 1e30f, 1e30f};   // never culled
+    return addChunk(vertices, indices, cb, lo, hi) != 0;
 }
 
 void VkRenderer::setCamera(const float target[3], float yaw, float pitch, float distance) {
@@ -793,7 +884,7 @@ bool VkRenderer::drawFrame() {
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkBeginCommandBuffer(cmd_, &bi);
     VkClearValue clear[2] = {};
-    if (indexCount_) clear[0].color = {{0.36f, 0.45f, 0.58f, 1.0f}};
+    if (!chunks_.empty()) clear[0].color = {{0.36f, 0.45f, 0.58f, 1.0f}};
     else clear[0].color = {{0.05f, 0.05f, 0.07f, 1.0f}};
     clear[1].depthStencil = {1.0f, 0};
     VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -808,7 +899,7 @@ bool VkRenderer::drawFrame() {
     vkCmdSetViewport(cmd_, 0, 1, &vp);
     vkCmdSetScissor(cmd_, 0, 1, &sc);
     const float screen = float(extent_.width) / float(extent_.height);
-    if (indexCount_) {
+    if (!chunks_.empty()) {
         // Orbit camera, Z up. Column-major matrices: clip = proj * view * world.
         const float cp = std::cos(camPitch_), sp = std::sin(camPitch_);
         const float eye[3] = {camTarget_[0] + camDist_ * cp * std::cos(camYaw_), camTarget_[1] + camDist_ * cp * std::sin(camYaw_),
@@ -820,7 +911,7 @@ bool VkRenderer::drawFrame() {
         const float sl = std::sqrt(s[0] * s[0] + s[1] * s[1]);
         s[0] /= sl; s[1] /= sl;
         const float u[3] = {s[1] * f[2] - s[2] * f[1], s[2] * f[0] - s[0] * f[2], s[0] * f[1] - s[1] * f[0]};
-        const float zn = std::max(0.05f, camDist_ * 0.01f), zf = camDist_ * 40.0f;
+        const float zn = std::max(0.05f, camDist_ * 0.01f), zf = std::max(camDist_ * 40.0f, 60000.0f);
         const float t = 1.0f / std::tan(0.5f * 1.0472f);   // 60 degree vertical field of view
         const float A = zf / (zn - zf), B = zn * zf / (zn - zf);
         // rows of the view matrix: s, u, -f; projection flips Y for Vulkan and maps depth to 0..1
@@ -834,26 +925,59 @@ bool VkRenderer::drawFrame() {
             m[c * 4 + 2] = A * vr[2][c] + (c == 3 ? B : 0.0f);
             m[c * 4 + 3] = -vr[2][c];
         }
-        vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_);
-        vkCmdPushConstants(cmd_, meshLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, m);
-        const VkDeviceSize zero = 0;
-        vkCmdBindVertexBuffers(cmd_, 0, 1, &vbuf_, &zero);
-        vkCmdBindIndexBuffer(cmd_, ibuf_, 0, VK_INDEX_TYPE_UINT32);
-        // Batches arrive in draw order: opaque, cutout, then decals.
-        bool decalBound = false;
-        for (const Batch& b : batches_) {
-            if (b.mode == 3) continue;   // invisible
-            if (b.mode == 2 && !decalBound && decalPipeline_) {
-                vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, decalPipeline_);
-                decalBound = true;
+        // Frustum planes from the clip matrix (column-major m: row r is m[r], m[4 + r], m[8 + r], m[12 + r]).
+        auto row = [&](int r, int k) { return m[k * 4 + r]; };
+        float planes[5][4];
+        for (int k = 0; k < 4; k++) {
+            planes[0][k] = row(3, k) + row(0, k);   // left
+            planes[1][k] = row(3, k) - row(0, k);   // right
+            planes[2][k] = row(3, k) + row(1, k);   // top / bottom
+            planes[3][k] = row(3, k) - row(1, k);
+            planes[4][k] = row(3, k) - row(2, k);   // far
+        }
+        auto visible = [&](const Chunk& ch) {
+            for (const auto& pl : planes) {
+                // the box corner furthest along the plane normal
+                const float x = pl[0] >= 0 ? ch.boxMax[0] : ch.boxMin[0];
+                const float y = pl[1] >= 0 ? ch.boxMax[1] : ch.boxMin[1];
+                const float z = pl[2] >= 0 ? ch.boxMax[2] : ch.boxMin[2];
+                if (pl[0] * x + pl[1] * y + pl[2] * z + pl[3] < 0) return false;
             }
-            const int32_t mode = int32_t(b.mode);
+            return true;
+        };
+        std::vector<const Chunk*> drawList;
+        for (const auto& [id, ch] : chunks_)
+            if (ch.visible && visible(ch)) drawList.push_back(&ch);
+        drawnChunks_ = drawList.size();
+        drawnTriangles_ = 0;
+        // Three passes over the chunks: opaque, cutout, then decals (blended, after all solid geometry).
+        for (uint32_t pass = 0; pass < 3; pass++) {
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pass == 2 && decalPipeline_ ? decalPipeline_ : meshPipeline_);
+            vkCmdPushConstants(cmd_, meshLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, m);
+            const int32_t mode = int32_t(pass);
             vkCmdPushConstants(cmd_, meshLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 64, 4, &mode);
-            VkDescriptorSet set = greyTexture_.set;
-            if (b.texture < sceneTextures_.size() && sceneTextures_[b.texture].set) set = sceneTextures_[b.texture].set;
-            vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, meshLayout_, 0, 1, &set, 0, nullptr);
-            if (b.firstIndex < indexCount_ && b.indexCount <= indexCount_ - b.firstIndex)
-                vkCmdDrawIndexed(cmd_, b.indexCount, 1, b.firstIndex, 0, 0);
+            for (const Chunk* ch : drawList) {
+                bool bound = false;
+                for (const ChunkBatch& b : ch->batches) {
+                    if (b.mode != pass) continue;
+                    if (!bound) {
+                        const VkDeviceSize zero = 0;
+                        vkCmdBindVertexBuffers(cmd_, 0, 1, &ch->vbuf, &zero);
+                        vkCmdBindIndexBuffer(cmd_, ch->ibuf, 0, VK_INDEX_TYPE_UINT32);
+                        bound = true;
+                    }
+                    VkDescriptorSet set = greyTexture_.set;
+                    if (b.texture) {
+                        const auto it = textures_.find(b.texture);
+                        if (it != textures_.end() && it->second.gpu.set) set = it->second.gpu.set;
+                    }
+                    vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, meshLayout_, 0, 1, &set, 0, nullptr);
+                    if (b.firstIndex < ch->indexCount && b.indexCount <= ch->indexCount - b.firstIndex) {
+                        vkCmdDrawIndexed(cmd_, b.indexCount, 1, b.firstIndex, 0, 0);
+                        drawnTriangles_ += b.indexCount / 3;
+                    }
+                }
+            }
         }
     } else {
         vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
@@ -899,9 +1023,7 @@ void VkRenderer::shutdown() {
         vkDeviceWaitIdle(dev_);
         destroySwapchain();
         destroyTexture();
-        destroyMesh();
-        for (GpuTexture& t : sceneTextures_) destroyGpuTexture(t);
-        sceneTextures_.clear();
+        clearChunks();
         destroyGpuTexture(greyTexture_);
         if (repeatSampler_) vkDestroySampler(dev_, repeatSampler_, nullptr);
         repeatSampler_ = VK_NULL_HANDLE;

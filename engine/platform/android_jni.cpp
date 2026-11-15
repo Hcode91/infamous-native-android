@@ -7,11 +7,14 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
+#include <deque>
 #include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -23,6 +26,7 @@
 #include "assets/world_mesh.h"
 #include "core/bytes.h"
 #include "render/vk_renderer.h"
+#include "world/city_stream.h"
 #include "world/scene.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "ina", __VA_ARGS__)
@@ -48,11 +52,6 @@ struct State {
     // handed to the render thread
     Image pending;
     bool hasPending = false;
-    std::vector<float> meshVertices;         // position xyz, normal xyz, uv
-    std::vector<uint32_t> meshIndices;
-    std::vector<VkRenderer::Batch> meshBatches;
-    std::vector<VkRenderer::SceneTexture> meshTextures;
-    bool hasPendingMesh = false;
 
     // the shared pack: most world textures live here
     std::vector<uint8_t> coreBytes;
@@ -68,12 +67,32 @@ struct State {
     std::vector<StaticMesh> cityMeshes;
     std::vector<MeshInstance> cityPieces;
 
-    // world viewer
+    // world viewer: the city streamed around the camera target
     std::vector<size_t> sectors;             // indexes into `packs` of the city sector packs
     size_t sector = 0;
-    bool sectorShown = false;
+    std::unique_ptr<CityLayout> layout;
+    std::map<std::string, Chunk> farChunks;  // far-away city, by sector name (built on the loader thread)
+    bool worldOn = false;                    // world view shown
+    bool overview = false;                   // whole city only, nothing in detail
     float target[3] = {0, 0, 0};
     float yaw = 0.7f, pitch = 0.45f, distance = 200.0f;
+    std::string here;                        // the sector the target is in
+    std::string loaderNote;                  // what the loader is doing
+
+    // loader thread -> render thread
+    struct Job {
+        enum Kind { Far, Add, Remove, Clear } kind = Add;
+        std::string sector;
+        uint8_t level = 0;
+        std::vector<Chunk> chunks;
+        std::vector<std::pair<uint64_t, TextureImage>> textures;
+    };
+    std::deque<Job> jobs;
+    std::set<uint64_t> heldTextures;         // what the renderer holds (copied after each job)
+    std::map<std::string, uint8_t> held;     // what the loader has asked for: sector -> level (255: far city)
+    std::thread loader;
+    std::atomic<bool> loaderRun{false};
+    std::atomic<size_t> drawnChunks{0}, drawnTriangles{0}, chunkCount{0};
 
     std::thread thread;
     std::atomic<bool> run{false};
@@ -118,6 +137,66 @@ std::string showCurrent() {   // caller holds the lock
            std::to_string(g.textures.size());
 }
 
+// Chunks the render thread holds, by sector, and the far-city chunk of each sector.
+std::map<std::string, std::vector<uint32_t>>& sectorChunks() {
+    static std::map<std::string, std::vector<uint32_t>> m;
+    return m;
+}
+std::map<std::string, uint32_t>& farChunkIds() {
+    static std::map<std::string, uint32_t> m;
+    return m;
+}
+
+void uploadChunk(VkRenderer& r, const Chunk& ch, std::vector<uint32_t>* ids) {
+    std::vector<VkRenderer::ChunkBatch> cb;
+    for (size_t i = 0; i < ch.scene.batches.size(); i++) {
+        const SceneBatch& b = ch.scene.batches[i];
+        cb.push_back({b.firstIndex, b.indexCount, i < ch.textureKeys.size() ? ch.textureKeys[i] : 0, uint32_t(b.mode)});
+    }
+    const uint32_t id = r.addChunk(ch.scene.vertices, ch.scene.indices, cb, ch.scene.boxMin, ch.scene.boxMax);
+    if (id && ids) ids->push_back(id);
+}
+
+void applyJob(VkRenderer& r, State::Job& j) {
+    for (const auto& [key, img] : j.textures) {
+        if (r.hasTexture(key)) continue;
+        VkRenderer::SceneTexture t;
+        t.width = img.width;
+        t.height = img.height;
+        t.levels = img.levels;
+        r.addTexture(key, t);
+    }
+    auto& sectors = sectorChunks();
+    auto& far = farChunkIds();
+    if (j.kind == State::Job::Far) {
+        size_t i = 0, start = 0;
+        while (i < j.chunks.size() && start < j.sector.size()) {
+            const size_t end = j.sector.find('\n', start);
+            const std::string name = j.sector.substr(start, end - start);
+            std::vector<uint32_t> ids;
+            uploadChunk(r, j.chunks[i], &ids);
+            if (!ids.empty()) far[name] = ids[0];
+            start = end + 1;
+            i++;
+        }
+    } else if (j.kind == State::Job::Add) {
+        std::vector<uint32_t> ids;
+        for (const Chunk& ch : j.chunks) uploadChunk(r, ch, &ids);
+        for (uint32_t id : sectors[j.sector]) r.removeChunk(id);   // the same sector at another level
+        sectors[j.sector] = ids;
+    } else if (j.kind == State::Job::Remove) {
+        for (uint32_t id : sectors[j.sector]) r.removeChunk(id);
+        sectors.erase(j.sector);
+    } else if (j.kind == State::Job::Clear) {
+        r.clearChunks();
+        sectors.clear();
+        far.clear();
+    }
+    // a sector held in detail hides its far-away stand-in
+    for (const auto& [name, id] : far) r.setChunkVisible(id, !sectors.count(name));
+    r.trimTextures(size_t(160) << 20);
+}
+
 void renderLoop() {
     VkRenderer r;
     if (!r.init(g.window)) {
@@ -138,26 +217,27 @@ void renderLoop() {
         }
         if (have) r.setImage(img.width, img.height, img.rgba);
         {
-            std::vector<float> mv;
-            std::vector<uint32_t> mi;
-            std::vector<VkRenderer::Batch> mb;
-            std::vector<VkRenderer::SceneTexture> mt;
-            bool haveMesh = false;
+            // Apply the next job from the loader: removals all at once, at most one addition per frame.
             float target[3], yaw, pitch, distance;
+            std::deque<State::Job> todo;
             {
                 std::lock_guard<std::mutex> l(g.lock);
-                if (g.hasPendingMesh) {   // copied, not moved: a new surface needs the scene again
-                    mv = g.meshVertices;
-                    mi = g.meshIndices;
-                    mb = g.meshBatches;
-                    mt = g.meshTextures;
-                    g.hasPendingMesh = false;
-                    haveMesh = true;
+                while (!g.jobs.empty()) {
+                    const bool add = g.jobs.front().kind == State::Job::Add || g.jobs.front().kind == State::Job::Far;
+                    todo.push_back(std::move(g.jobs.front()));
+                    g.jobs.pop_front();
+                    if (add) break;
                 }
                 target[0] = g.target[0]; target[1] = g.target[1]; target[2] = g.target[2];
                 yaw = g.yaw; pitch = g.pitch; distance = g.distance;
             }
-            if (haveMesh) r.setScene(mv, mi, mb, mt);
+            if (!todo.empty()) {
+                for (State::Job& j : todo) applyJob(r, j);
+                std::lock_guard<std::mutex> l(g.lock);
+                const auto keys = r.textureKeys();
+                g.heldTextures = std::set<uint64_t>(keys.begin(), keys.end());
+                g.chunkCount.store(r.chunkCount());
+            }
             r.setCamera(target, yaw, pitch, distance);
         }
         if (!r.drawFrame()) {
@@ -166,8 +246,12 @@ void renderLoop() {
             break;
         }
         g.frameMs.store(r.lastFrameMs());
+        g.drawnChunks.store(r.drawnChunks());
+        g.drawnTriangles.store(r.drawnTriangles());
     }
     r.shutdown();
+    sectorChunks().clear();
+    farChunkIds().clear();
 }
 
 void stopRender() {
@@ -177,131 +261,178 @@ void stopRender() {
     g.window = nullptr;
 }
 
-// Builds the scene for the world view and hands it to the render thread. `sector` is null for the whole
-// city seen from far away; otherwise that sector is drawn in full detail, at its place in the city when
-// the hex map names it, with the far-away version of every other sector around it. Caller holds the lock.
-std::string buildWorld(const Pack* sector, const std::string& sectorName) {
-    const float zero[3] = {0, 0, 0};
-    float offset[3] = {0, 0, 0};
-    uint32_t sectorOid = 0;
-    bool placed = false;
-    if (sector) {
-        // "A12.xpp" is the cell named "a12"
-        std::string cellName = sectorName.substr(0, sectorName.find('.'));
-        for (char& ch : cellName) ch = char(std::tolower(static_cast<unsigned char>(ch)));
-        for (const HexCell& cell : g.cells) {
-            if (cell.nameOid >= g.names.size() || g.names[cell.nameOid] != cellName) continue;
-            for (int k = 0; k < 3; k++) offset[k] = cell.center[k];
-            sectorOid = cell.nameOid;
-            placed = true;
-            break;
-        }
-    }
-    SceneBuilder builder;
-    size_t sectorPieces = 0, sectorTriangles = 0, missingPieces = 0;
-    std::vector<float> centers;
-    std::vector<StaticMesh> meshes;
-    if (sector) {
-        meshes = readStaticMeshes(*sector, nullptr, g.shared.get(), g.names.empty() ? nullptr : &g.names);
-        for (const MeshInstance& in : readMeshInstances(*sector, meshes, &missingPieces)) {
-            const StaticMesh& m = meshes[in.mesh];
-            if (m.lodMin != 0) continue;   // the nearest level of detail; piece flags are decal layers
-            builder.add(m, in.matrix.data(), offset, uint8_t(in.flags));
-        }
-        sectorPieces = builder.pieces();
-        sectorTriangles = builder.triangles();
-        centers = builder.centers();
-    }
-    if (!sector || placed) {
-        for (const MeshInstance& in : g.cityPieces) {
-            const StaticMesh& m = g.cityMeshes[in.mesh];
-            if (sector && m.nameOid == sectorOid) continue;
-            builder.add(m, in.matrix.data(), zero, uint8_t(in.flags));
-        }
-    }
-    const size_t pieces = builder.pieces(), triangles = builder.triangles();
-    Scene scene = builder.finish();
+std::string upperPackName(const std::string& sector) {
+    std::string n = sector;
+    for (char& ch : n) ch = char(std::toupper(static_cast<unsigned char>(ch)));
+    return n + ".xpp";
+}
 
-    // Textures: the sector's own first, then the city pack, then the shared pack. The largest level kept is
-    // 512 texels in a sector and 256 for the far-away city.
-    std::map<uint32_t, TextureInfo> local;
-    if (sector)
-        for (const TextureInfo& t : sector->textures())
-            if (t.format != PixelFormat::Unknown && !t.cube) local[t.oid] = t;
-    std::vector<VkRenderer::SceneTexture> textures;
-    std::vector<VkRenderer::Batch> batches;
-    size_t notFound = 0;
-    for (const SceneBatch& b : scene.batches) {
-        uint32_t slot = 0xFFFFFFFFu;
-        if (b.textureOid != 0) {
-            const Pack* from = nullptr;
-            const TextureInfo* info = nullptr;
-            uint32_t limit = 512;
-            if (const auto it = local.find(b.textureOid); it != local.end()) { info = &it->second; from = sector; }
-            else if (const auto ic = g.cityTextures.find(b.textureOid); ic != g.cityTextures.end() && g.city) { info = &ic->second; from = g.city.get(); limit = 256; }
-            else if (const auto ik = g.coreTextures.find(b.textureOid); ik != g.coreTextures.end() && g.core) { info = &ik->second; from = g.core.get(); }
-            if (!info) {
-                notFound++;
-            } else if (textures.size() < 500) {
-                try {
-                    const uint32_t mips = std::max(1u, info->mips);
-                    uint32_t first = 0;
-                    while (first + 1 < mips && std::max(info->width, info->height) >> first > limit) first++;
-                    VkRenderer::SceneTexture st;
-                    st.width = std::max(1u, info->width >> first);
-                    st.height = std::max(1u, info->height >> first);
-                    for (uint32_t m = first; m < mips; m++) st.levels.push_back(decodeTexture(*from, *info, 0, m).rgba);
-                    slot = uint32_t(textures.size());
-                    textures.push_back(std::move(st));
-                } catch (const std::exception&) {
-                    slot = 0xFFFFFFFFu;
+std::vector<uint8_t> readPackNamed(const std::string& name) {   // archives are safe to read from any thread
+    for (auto& a : g.archives) {
+        const int i = a->find(name);
+        if (i >= 0) return a->read(size_t(i));
+    }
+    return {};
+}
+
+// Loader thread: keeps the set of sectors around the target loaded at the right level of detail. Each
+// change is one job for the render thread. Decoding happens here, without the state lock.
+void loaderLoop() {
+    auto push = [](State::Job&& j) {
+        std::lock_guard<std::mutex> l(g.lock);
+        g.jobs.push_back(std::move(j));
+    };
+    while (g.loaderRun.load()) {
+        float x, y;
+        bool overview, needFar;
+        std::vector<StreamWant> want;
+        {
+            std::lock_guard<std::mutex> l(g.lock);
+            x = g.target[0];
+            y = g.target[1];
+            overview = g.overview;
+            needFar = !g.held.count("");   // the far-away city is held under the empty name
+        }
+        if (needFar && g.core && g.city) {
+            try {
+                std::vector<Chunk> chunks;
+                std::vector<std::string> keys;
+                {
+                    std::lock_guard<std::mutex> l(g.lock);
+                    g.loaderNote = "building the far-away city";
+                    if (g.farChunks.empty()) g.farChunks = buildFarCityChunks(g.cityMeshes, g.cityPieces, g.names);
+                    for (auto& [k, ch] : g.farChunks) {
+                        keys.push_back(k);
+                        chunks.push_back(ch);
+                    }
                 }
+                std::set<uint64_t> have;
+                auto tex = decodeChunkTextures(chunks, {{g.city.get(), &g.cityTextures}, {g.core.get(), &g.coreTextures}}, 64,
+                                               [&](uint64_t k) { return have.count(k) != 0; });
+                State::Job j;
+                j.kind = State::Job::Far;
+                j.chunks = std::move(chunks);
+                j.textures = std::move(tex);
+                {
+                    std::lock_guard<std::mutex> l(g.lock);
+                    g.held[""] = 255;
+                    g.loaderNote.clear();
+                }
+                // the sector each chunk stands in for, one per line, in chunk order
+                for (const std::string& k : keys) j.sector += k + "\n";
+                push(std::move(j));
+            } catch (const std::exception& e) {
+                std::lock_guard<std::mutex> l(g.lock);
+                g.loaderNote = std::string("far city: ") + e.what();
+                g.held[""] = 255;
+            }
+            continue;
+        }
+        bool busy;
+        {
+            std::lock_guard<std::mutex> l(g.lock);
+            busy = g.jobs.size() > 2 || !g.layout;   // don't run ahead of the render thread
+            if (!busy && !overview) {
+                want = g.layout->plan(x, y, 13000.0f);
+                g.here = want.empty() || want[0].level != 0 ? "" : want[0].sector;
             }
         }
-        batches.push_back({b.firstIndex, b.indexCount, slot, uint32_t(b.mode)});
+        if (busy) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            continue;
+        }
+        // First anything wanted that is missing or at the wrong level (nearest first), then removals.
+        bool did = false;
+        for (const StreamWant& w : want) {
+            uint8_t have = 254;
+            {
+                std::lock_guard<std::mutex> l(g.lock);
+                auto it = g.held.find(w.sector);
+                if (it != g.held.end()) have = it->second;
+            }
+            if (have == w.level) continue;
+            try {
+                {
+                    std::lock_guard<std::mutex> l(g.lock);
+                    g.loaderNote = "loading " + w.sector;
+                }
+                const std::vector<uint8_t> bytes = readPackNamed(upperPackName(w.sector));
+                State::Job j;
+                j.kind = State::Job::Add;
+                j.sector = w.sector;
+                j.level = w.level;
+                if (!bytes.empty()) {
+                    Pack p(bytes);
+                    const HexCell* cell = g.layout->cell(w.sector);
+                    const float zero[3] = {0, 0, 0};
+                    j.chunks = buildSectorChunks(p, g.shared.get(), &g.names, w.level, cell ? cell->center : zero, 3);
+                    const auto own = textureIndex(p);
+                    std::set<uint64_t> have;
+                    {
+                        std::lock_guard<std::mutex> l(g.lock);
+                        have = g.heldTextures;
+                    }
+                    j.textures = decodeChunkTextures(j.chunks, {{&p, &own}, {g.city.get(), &g.cityTextures}, {g.core.get(), &g.coreTextures}},
+                                                     w.level == 0 ? 512 : 128, [&](uint64_t k) { return have.count(k) != 0; });
+                }
+                {
+                    std::lock_guard<std::mutex> l(g.lock);
+                    g.held[w.sector] = w.level;
+                    g.loaderNote.clear();
+                }
+                push(std::move(j));
+            } catch (const std::exception& e) {
+                std::lock_guard<std::mutex> l(g.lock);
+                g.held[w.sector] = w.level;   // don't retry a broken pack forever
+                g.loaderNote = w.sector + ": " + e.what();
+            }
+            did = true;
+            break;   // re-plan after every sector: the target may have moved
+        }
+        if (!did) {
+            std::vector<std::string> drop;
+            {
+                std::lock_guard<std::mutex> l(g.lock);
+                for (const auto& [s, lv] : g.held) {
+                    if (s.empty()) continue;
+                    if (std::none_of(want.begin(), want.end(), [&](const StreamWant& w) { return w.sector == s; })) drop.push_back(s);
+                }
+                for (const std::string& s : drop) {
+                    g.held.erase(s);
+                    State::Job j;
+                    j.kind = State::Job::Remove;
+                    j.sector = s;
+                    g.jobs.push_back(std::move(j));
+                }
+            }
+            if (drop.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     }
+}
 
-    if (sector && centers.size() >= 3) {
-        // Aim at the middle of the sector. Medians, because a sector also holds a few far-away pieces.
-        std::vector<float> axis[3];
-        for (size_t i = 0; i + 2 < centers.size(); i += 3)
-            for (int k = 0; k < 3; k++) axis[k].push_back(centers[i + size_t(k)]);
-        auto median = [](std::vector<float> v) {
-            std::nth_element(v.begin(), v.begin() + long(v.size() / 2), v.end());
-            return v[v.size() / 2];
-        };
-        for (int k = 0; k < 3; k++) g.target[k] = median(axis[k]);
-        std::vector<float> d;
-        for (size_t i = 0; i < axis[0].size(); i++) d.push_back(std::hypot(axis[0][i] - g.target[0], axis[1][i] - g.target[1]));
-        std::nth_element(d.begin(), d.begin() + long(d.size() * 3 / 4), d.end());
-        g.distance = std::max(20.0f, d[d.size() * 3 / 4] * 2.5f);
-    } else if (!scene.vertices.empty()) {
-        for (int k = 0; k < 3; k++) g.target[k] = (scene.boxMin[k] + scene.boxMax[k]) * 0.5f;
-        g.target[2] = 0;
-        g.distance = 0.6f * std::max(scene.boxMax[0] - scene.boxMin[0], scene.boxMax[1] - scene.boxMin[1]);
-        g.pitch = 0.9f;
-    }
-    const size_t textureCount = textures.size();
-    g.meshVertices = std::move(scene.vertices);
-    g.meshIndices = std::move(scene.indices);
-    g.meshBatches = std::move(batches);
-    g.meshTextures = std::move(textures);
-    g.hasPendingMesh = true;
-    g.sectorShown = true;
-    std::string msg;
-    if (sector) {
-        msg = sectorName + "  (sector " + std::to_string(g.sector + 1) + " of " + std::to_string(g.sectors.size()) + ")\n" +
-              std::to_string(sectorPieces) + " pieces, " + std::to_string(sectorTriangles) + " triangles" +
-              (missingPieces ? ", " + std::to_string(missingPieces) + " pieces not decoded" : "") + "\n" +
-              (placed ? "with the far-away city: " + std::to_string(triangles) + " triangles in all\n"
-                      : (g.names.empty() ? "not placed in the city: oid_manifest.txt was not imported\n" : "not placed in the city: no hex cell with this name\n"));
-    } else {
-        msg = "Whole city, far-away version\n" + std::to_string(pieces) + " pieces, " + std::to_string(triangles) + " triangles, " +
-              std::to_string(g.cells.size()) + " hex cells\n";
-    }
-    msg += std::to_string(textureCount) + " textures" + (notFound ? ", " + std::to_string(notFound) + " not found" : "") +
-           ". Drag to turn, pinch to zoom.";
-    return msg;
+void startLoader() {   // caller holds no lock
+    if (g.loaderRun.load()) return;
+    g.loaderRun.store(true);
+    g.loader = std::thread(loaderLoop);
+}
+
+void stopLoader() {
+    g.loaderRun.store(false);
+    if (g.loader.joinable()) g.loader.join();
+}
+
+std::string worldStatus() {   // caller holds the lock
+    std::string s;
+    if (g.overview) s = "Whole city, far-away version";
+    else s = g.here.empty() ? "Between sectors" : "Sector " + g.here;
+    size_t detail = 0;
+    for (const auto& [k, v] : g.held)
+        if (!k.empty()) detail++;
+    s += "  |  " + std::to_string(detail) + " sectors in detail, " + std::to_string(g.chunkCount.load()) + " chunks, drawing " +
+         std::to_string(g.drawnChunks.load()) + " (" + std::to_string(g.drawnTriangles.load() / 1000) + "k triangles)";
+    if (!g.loaderNote.empty()) s += "\n" + g.loaderNote + "...";
+    else s += "\nDrag to turn, pinch to zoom, two fingers to move.";
+    return s;
 }
 
 }  // namespace
@@ -309,7 +440,9 @@ std::string buildWorld(const Pack* sector, const std::string& sectorName) {
 extern "C" {
 
 JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_open(JNIEnv* env, jclass, jstring jdir) {
+    stopLoader();   // it reads the packs being replaced
     std::lock_guard<std::mutex> l(g.lock);
+    g.worldOn = false;
     const std::string dir = jstr(env, jdir);
     g.archives.clear();
     g.packs.clear();
@@ -332,6 +465,10 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_open(JNIEnv* env, jc
         g.coreTextures.clear();
         g.coreBytes.clear();
         g.city.reset();
+        g.layout.reset();
+        g.farChunks.clear();
+        g.held.clear();
+        g.jobs.clear();
         g.cityTextures.clear();
         g.cityBytes.clear();
         g.cells.clear();
@@ -355,6 +492,7 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_open(JNIEnv* env, jc
             for (const TextureInfo& t : g.city->textures())
                 if (t.format != PixelFormat::Unknown && !t.cube) g.cityTextures[t.oid] = t;
             g.cells = readHexCells(*g.city);
+            if (!g.names.empty()) g.layout = std::make_unique<CityLayout>(g.cells, g.names);
             g.cityMeshes = readStaticMeshes(*g.city, nullptr, g.shared.get(), g.names.empty() ? nullptr : &g.names);
             g.cityPieces = readMeshInstances(*g.city, g.cityMeshes, nullptr, kHexMapClass);
             break;
@@ -369,7 +507,6 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_open(JNIEnv* env, jc
                 g.sectors.push_back(i);
         }
         g.sector = 0;
-        g.sectorShown = false;
         g.pack = g.texture = 0;
         loadPack();
         msg = "OK " + std::to_string(g.packs.size()) + " packs" + (g.names.empty() ? ", no name list" : "");
@@ -409,47 +546,91 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_step(JNIEnv* env, jc
     return env->NewStringUTF(msg.c_str());
 }
 
-// Loads a city sector (moving by `delta` sectors, wrapping) and shows it in place.
+// Shows the city streamed around a sector: moves by `delta` sectors (wrapping) and puts the camera there.
+// With delta 0 the camera stays where it was, if the world view was already in use.
 JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_world(JNIEnv* env, jclass, jint delta) {
-    std::lock_guard<std::mutex> l(g.lock);
-    if (g.sectors.empty()) return env->NewStringUTF("No city sector packs found");
     std::string msg;
-    try {
+    {
+        std::lock_guard<std::mutex> l(g.lock);
+        if (g.sectors.empty()) return env->NewStringUTF("No city sector packs found");
+        if (!g.layout) return env->NewStringUTF("The city layout needs EMPIRE.xpp and oid_manifest.txt among the imported files");
         const long n = long(g.sectors.size());
-        if (g.sectorShown || delta != 0) g.sector = size_t(((long(g.sector) + delta) % n + n) % n);
-        const PackRef ref = g.packs[g.sectors[g.sector]];
-        const std::string name = g.archives[ref.archive]->entries()[ref.entry].name;
-        const std::vector<uint8_t> bytes = g.archives[ref.archive]->read(ref.entry);
-        const Pack p(bytes);
-        msg = buildWorld(&p, name);
-    } catch (const std::exception& e) {
-        msg = std::string("ERROR ") + e.what();
+        const bool jump = delta != 0 || !g.worldOn || g.overview;
+        g.sector = size_t(((long(g.sector) + delta) % n + n) % n);
+        g.worldOn = true;
+        g.overview = false;
+        if (jump) {
+            const PackRef ref = g.packs[g.sectors[g.sector]];
+            std::string name = g.archives[ref.archive]->entries()[ref.entry].name;
+            name = name.substr(0, name.find('.'));
+            for (char& ch : name) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+            if (const HexCell* cell = g.layout->cell(name)) {
+                for (int k = 0; k < 3; k++) g.target[k] = cell->center[k];
+                g.distance = 4000.0f;
+                g.pitch = 0.5f;
+            } else {
+                msg = name + " has no place in the city (not in the hex map)\n";
+            }
+        }
+        msg += worldStatus();
     }
+    startLoader();
     return env->NewStringUTF(msg.c_str());
 }
 
-// Shows the whole city as the game draws it from far away.
+// Shows the whole city from far away (nothing in detail).
 JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_city(JNIEnv* env, jclass) {
-    std::lock_guard<std::mutex> l(g.lock);
-    if (!g.city || g.cityPieces.empty()) return env->NewStringUTF("The city pack (EMPIRE.xpp) was not found or holds no far-away city");
     std::string msg;
-    try {
-        msg = buildWorld(nullptr, "");
-    } catch (const std::exception& e) {
-        msg = std::string("ERROR ") + e.what();
+    {
+        std::lock_guard<std::mutex> l(g.lock);
+        if (!g.city || g.cityPieces.empty() || !g.layout) return env->NewStringUTF("The city pack (EMPIRE.xpp) or oid_manifest.txt is missing");
+        g.worldOn = true;
+        g.overview = true;
+        // the middle of the open city, seen from high up
+        float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
+        for (const auto& [nm, c] : g.layout->cells()) {
+            if (c.flags[1] != 0x1000000u) continue;
+            for (int k = 0; k < 2; k++) {
+                lo[k] = std::min(lo[k], c.center[k]);
+                hi[k] = std::max(hi[k], c.center[k]);
+            }
+        }
+        g.target[0] = (lo[0] + hi[0]) * 0.5f;
+        g.target[1] = (lo[1] + hi[1]) * 0.5f;
+        g.target[2] = 0;
+        g.distance = 0.75f * std::max(hi[0] - lo[0], hi[1] - lo[1]);
+        g.pitch = 0.9f;
+        msg = worldStatus();
     }
+    startLoader();
     return env->NewStringUTF(msg.c_str());
 }
 
-// Leaves the world view: the texture viewer is drawn again.
-JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_hideWorld(JNIEnv*, jclass) {
+// What the world view is showing now (polled by the app).
+JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_worldStatus(JNIEnv* env, jclass) {
     std::lock_guard<std::mutex> l(g.lock);
-    g.meshVertices.clear();
-    g.meshIndices.clear();
-    g.meshBatches.clear();
-    g.meshTextures.clear();
-    g.hasPendingMesh = true;
-    g.sectorShown = false;
+    const std::string s = g.worldOn ? worldStatus() : std::string();
+    return env->NewStringUTF(s.c_str());
+}
+
+// Leaves the world view: the texture viewer is drawn again and the streamed city is let go.
+JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_hideWorld(JNIEnv*, jclass) {
+    stopLoader();
+    std::lock_guard<std::mutex> l(g.lock);
+    g.worldOn = false;
+    g.overview = false;
+    g.jobs.clear();
+    g.held.clear();
+    State::Job j;
+    j.kind = State::Job::Clear;
+    g.jobs.push_back(std::move(j));
+    g.hasPending = g.packLoaded && !g.textures.empty();
+    if (g.hasPending) {
+        try {
+            showCurrent();
+        } catch (const std::exception&) {
+        }
+    }
 }
 
 // Turns the orbit camera by the given angles (radians) and multiplies its distance by `zoom`.
@@ -460,6 +641,18 @@ JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_camera(JNIEnv*, jclass,
     g.distance = std::clamp(g.distance * zoom, 2.0f, 400000.0f);
 }
 
+// Moves the camera target over the ground: (dx, dy) in screen fractions, right and up positive. The step
+// grows with the camera distance, so a swipe moves about one screen's width of ground.
+JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_pan(JNIEnv*, jclass, jfloat dx, jfloat dy) {
+    std::lock_guard<std::mutex> l(g.lock);
+    const float scale = g.distance * 1.2f;
+    // screen right is perpendicular to the view direction; screen up moves away from the camera
+    const float fx = -std::cos(g.yaw), fy = -std::sin(g.yaw);   // ground direction the camera looks along
+    const float rx = fy, ry = -fx;
+    g.target[0] += (rx * -dx + fx * dy) * scale;
+    g.target[1] += (ry * -dx + fy * dy) * scale;
+}
+
 JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_setSurface(JNIEnv* env, jclass, jobject surface) {
     stopRender();
     if (!surface) return;
@@ -468,7 +661,10 @@ JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_setSurface(JNIEnv* env,
     {
         std::lock_guard<std::mutex> l(g.lock);
         g.renderError.clear();
-        g.hasPendingMesh = g.sectorShown;
+        // a new renderer starts empty: the loader sends everything again
+        g.jobs.clear();
+        g.held.clear();
+        g.heldTextures.clear();
         // show the current texture again on the new surface
         try {
             if (g.packLoaded && !g.textures.empty()) showCurrent();

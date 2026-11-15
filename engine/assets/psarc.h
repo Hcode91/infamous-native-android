@@ -2,6 +2,7 @@
 #pragma once
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -23,11 +24,12 @@ public:
 
     const std::vector<Entry>& entries() const { return entries_; }   // manifest itself is not listed
     int find(const std::string& name) const;                         // -1 when absent
-    std::vector<uint8_t> read(size_t index) const;
+    std::vector<uint8_t> read(size_t index) const;   // safe to call from several threads
 
 private:
     std::vector<uint8_t> readRaw(const Entry& e) const;
     FILE* f_ = nullptr;
+    mutable std::mutex fileLock_;   // one seek-and-read at a time on f_
     uint32_t blockSize_ = 0;
     std::vector<uint32_t> blockSizes_;
     std::vector<Entry> entries_;

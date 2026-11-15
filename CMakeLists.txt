@@ -14,6 +14,7 @@ add_library(ina_core STATIC
     engine/assets/hex_map.cpp
     engine/assets/vertex_layout.cpp
     engine/world/scene.cpp
+    engine/world/city_stream.cpp
     engine/core/png.cpp)
 target_include_directories(ina_core PUBLIC engine)
 target_compile_options(ina_core PRIVATE -Wall -Wextra)

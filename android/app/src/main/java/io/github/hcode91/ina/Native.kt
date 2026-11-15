@@ -20,6 +20,12 @@ object Native {
     /** Shows the whole city as drawn from far away. Returns a description. */
     @JvmStatic external fun city(): String
 
+    /** Moves the world camera over the ground by a fraction of the screen (right and up positive). */
+    @JvmStatic external fun pan(dx: Float, dy: Float)
+
+    /** Describes what the world view is streaming and drawing now; empty outside the world view. */
+    @JvmStatic external fun worldStatus(): String
+
     /** Goes back to the texture viewer. */
     @JvmStatic external fun hideWorld()
 

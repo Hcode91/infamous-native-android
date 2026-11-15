@@ -42,6 +42,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var cityButton: Button
     private var lastX = 0f
     private var lastY = 0f
+    private var midX = 0f
+    private var midY = 0f
 
     private val gameDir: File get() = File(filesDir, "game")
 
@@ -68,7 +70,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
         root.addView(stats, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.END))
 
-        // World view gestures: one finger turns the camera, two fingers zoom.
+        // World view gestures: one finger turns the camera, two fingers pinch to zoom and drag to move.
         val pinch = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(d: ScaleGestureDetector): Boolean {
                 if (worldMode && d.scaleFactor > 0f) Native.camera(0f, 0f, 1f / d.scaleFactor)
@@ -79,9 +81,17 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             pinch.onTouchEvent(e)
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> { lastX = e.x; lastY = e.y }
+                MotionEvent.ACTION_POINTER_DOWN -> if (e.pointerCount == 2) {
+                    midX = (e.getX(0) + e.getX(1)) / 2f; midY = (e.getY(0) + e.getY(1)) / 2f
+                }
                 MotionEvent.ACTION_MOVE -> if (worldMode && e.pointerCount == 1 && !pinch.isInProgress) {
                     Native.camera(-(e.x - lastX) * 0.006f, (e.y - lastY) * 0.006f, 1f)
                     lastX = e.x; lastY = e.y
+                } else if (worldMode && e.pointerCount >= 2) {
+                    // the midpoint of two fingers moves the camera over the ground
+                    val mx = (e.getX(0) + e.getX(1)) / 2f; val my = (e.getY(0) + e.getY(1)) / 2f
+                    Native.pan((mx - midX) / v.width, -(my - midY) / v.height)
+                    midX = mx; midY = my
                 }
                 MotionEvent.ACTION_POINTER_UP -> {
                     // carry on from the finger that stays down, so the view does not jump
@@ -148,7 +158,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         if (required.all { File(gameDir, it).length() > 0 }) openGame() else showNeedsImport()
         ui.post(object : Runnable {
             override fun run() {
-                if (opened) stats.text = Native.status()
+                if (opened) {
+                    stats.text = Native.status()
+                    if (worldMode) Native.worldStatus().let { if (it.isNotEmpty()) info.text = it }
+                }
                 ui.postDelayed(this, 500)
             }
         })

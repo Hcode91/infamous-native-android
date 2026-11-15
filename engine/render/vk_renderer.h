@@ -1,9 +1,10 @@
-// Vulkan presentation for Android: swapchain, one textured-quad pipeline, one RGBA8 texture.
-// This is the foundation the world renderer will grow from; today it shows decoded game textures.
+// Vulkan presentation for Android: a textured-quad view for single images, and a world view made of
+// chunks (separately added and removed pieces of geometry, culled against the view) sharing textures.
 #pragma once
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,30 @@ public:
     };
     bool setScene(const std::vector<float>& vertices, const std::vector<uint32_t>& indices, const std::vector<Batch>& batches,
                   const std::vector<SceneTexture>& textures);
+    // World chunks. Each chunk owns its vertex and index buffers; its batches name textures by key (0 = grey).
+    // Textures are shared between chunks and freed when the last chunk using them is removed. Must be called
+    // on the thread that draws.
+    struct ChunkBatch {
+        uint32_t firstIndex = 0, indexCount = 0;
+        uint64_t texture = 0;
+        uint32_t mode = 0;   // as in Batch
+    };
+    bool hasTexture(uint64_t key) const;
+    bool addTexture(uint64_t key, const SceneTexture& texture);   // a texture no chunk uses yet
+    uint32_t addChunk(const std::vector<float>& vertices, const std::vector<uint32_t>& indices, const std::vector<ChunkBatch>& batches,
+                      const float boxMin[3], const float boxMax[3]);   // returns the chunk id, 0 on failure
+    void removeChunk(uint32_t id);
+    void setChunkVisible(uint32_t id, bool visible);
+    void clearChunks();
+    size_t chunkCount() const { return chunks_.size(); }
+    size_t textureCount() const { return textures_.size(); }
+    std::vector<uint64_t> textureKeys() const;
+    // Textures no chunk uses are kept for reuse until the total size passes `budgetBytes`; then the oldest
+    // unused ones are freed.
+    void trimTextures(size_t budgetBytes);
+    // Chunks and triangles drawn in the last frame (after culling).
+    size_t drawnChunks() const { return drawnChunks_; }
+    size_t drawnTriangles() const { return drawnTriangles_; }
     // Orbit camera around `target`: yaw and pitch in radians, distance in world units. Z is up.
     void setCamera(const float target[3], float yaw, float pitch, float distance);
     // Draws one frame. Returns false on an error that needs a restart; a changed surface is handled inside.
@@ -43,7 +68,6 @@ private:
     bool createSwapchain();
     void destroySwapchain();
     void destroyTexture();
-    void destroyMesh();
     bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, const void* src, VkBuffer* buf, VkDeviceMemory* mem);
     uint32_t memoryType(uint32_t bits, VkMemoryPropertyFlags props) const;
 
@@ -69,9 +93,6 @@ private:
     VkImage depth_ = VK_NULL_HANDLE;
     VkDeviceMemory depthMem_ = VK_NULL_HANDLE;
     VkImageView depthView_ = VK_NULL_HANDLE;
-    VkBuffer vbuf_ = VK_NULL_HANDLE, ibuf_ = VK_NULL_HANDLE;
-    VkDeviceMemory vmem_ = VK_NULL_HANDLE, imem_ = VK_NULL_HANDLE;
-    uint32_t indexCount_ = 0;
     struct GpuTexture {
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -80,9 +101,30 @@ private:
     };
     bool uploadTexture(uint32_t w, uint32_t h, const std::vector<std::vector<uint8_t>>& levels, VkSampler sampler, GpuTexture* out);
     void destroyGpuTexture(GpuTexture& t);
-    std::vector<GpuTexture> sceneTextures_;
+    struct SharedTexture {
+        GpuTexture gpu;
+        uint32_t users = 0;
+        size_t bytes = 0;
+        uint64_t lastUsed = 0;   // counter value when its last user went away
+    };
+    size_t textureBytes_ = 0;
+    uint64_t releaseCounter_ = 0;
+    struct Chunk {
+        VkBuffer vbuf = VK_NULL_HANDLE, ibuf = VK_NULL_HANDLE;
+        VkDeviceMemory vmem = VK_NULL_HANDLE, imem = VK_NULL_HANDLE;
+        uint32_t indexCount = 0;
+        std::vector<ChunkBatch> batches;
+        float boxMin[3] = {0, 0, 0}, boxMax[3] = {0, 0, 0};
+        bool visible = true;
+    };
+    void destroyChunk(Chunk& c);
+    void releaseTexture(uint64_t key);
+    void waitIdleFrame();
+    std::map<uint64_t, SharedTexture> textures_;
+    std::map<uint32_t, Chunk> chunks_;
+    uint32_t nextChunk_ = 1;
+    size_t drawnChunks_ = 0, drawnTriangles_ = 0;
     GpuTexture greyTexture_;
-    std::vector<Batch> batches_;
     VkSampler repeatSampler_ = VK_NULL_HANDLE;
     float camTarget_[3] = {0, 0, 0};
     float camYaw_ = 0.6f, camPitch_ = 0.5f, camDist_ = 100.0f;

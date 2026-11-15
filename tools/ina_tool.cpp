@@ -11,11 +11,14 @@
 #include "assets/world_mesh.h"
 #include "core/bytes.h"
 #include "core/png.h"
+#include "world/city_stream.h"
 #include "world/scene.h"
 
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <chrono>
+#include <cctype>
 #include <map>
 #include <memory>
 #include <string>
@@ -197,6 +200,64 @@ int main(int argc, char** argv) {
             printf("%zu meshes with texture coordinates, %zu with a colour texture; pack lends %zu buffer sets and borrows %zu\n", withUv,
                    withTex, p.geometryExports().size(), p.geometryImports().size());
             if (!names.empty()) printf("%zu decal meshes, %zu light volumes (not drawn)\n", decals, invisible);
+            return 0;
+        }
+        if (cmd == "stream" && argc >= 6) {
+            // ina_tool stream <archive 1> <archive 2> <oid_manifest.txt> <x> <y>: what streaming would hold
+            // around (x, y), with chunk and texture counts and timings.
+            Psarc other(argv[3]);
+            const Psarc* arcs[2] = {&arc, &other};
+            const auto names = loadNames(argv[4]);
+            const float x = float(atof(argv[5])), y = argc > 6 ? float(atof(argv[6])) : 0.0f;
+            auto readPack = [&](const std::string& n) {
+                for (const Psarc* a : arcs) {
+                    const int i = a->find(n);
+                    if (i >= 0) return a->read(size_t(i));
+                }
+                return std::vector<uint8_t>();
+            };
+            const auto coreBytes = readPack("core.xpp"), cityBytes = readPack("EMPIRE.xpp");
+            Pack core(coreBytes), city(cityBytes);
+            const SharedGeometry shared(core);
+            const CityLayout layout(readHexCells(city), names);
+            const auto coreTex = textureIndex(core), cityTex = textureIndex(city);
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto cityMeshes = readStaticMeshes(city, nullptr, &shared, &names);
+            auto far = buildFarCityChunks(cityMeshes, readMeshInstances(city, cityMeshes, nullptr, kHexMapClass), names);
+            printf("far city: %zu chunks in %.0f ms\n", far.size(),
+                   std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            size_t totalTris = 0, totalTex = 0, texBytes = 0;
+            std::map<uint64_t, bool> held;
+            for (const StreamWant& w : layout.plan(x, y, 13000.0f)) {
+                const auto t1 = std::chrono::steady_clock::now();
+                std::string packName = w.sector;
+                for (char& ch : packName) ch = char(std::toupper(static_cast<unsigned char>(ch)));
+                const auto bytes = readPack(packName + ".xpp");
+                if (bytes.empty()) {
+                    printf("  %s: no pack\n", w.sector.c_str());
+                    continue;
+                }
+                Pack p(bytes);
+                const HexCell* cell = layout.cell(w.sector);
+                size_t missing = 0;
+                auto chunks = buildSectorChunks(p, &shared, &names, w.level, cell->center, 3, &missing);
+                const auto own = textureIndex(p);
+                const uint32_t maxSize = w.level == 0 ? 512 : 128;
+                auto tex = decodeChunkTextures(chunks, {{&p, &own}, {&city, &cityTex}, {&core, &coreTex}}, maxSize,
+                                               [&](uint64_t k) { return held.count(k) != 0; });
+                size_t tris = 0;
+                for (const Chunk& ch : chunks) tris += ch.scene.indices.size() / 3;
+                for (const auto& [k, img] : tex) {
+                    held[k] = true;
+                    for (const auto& l : img.levels) texBytes += l.size();
+                }
+                totalTris += tris;
+                totalTex += tex.size();
+                printf("  %-5s level %u: %zu chunks, %zu triangles, %zu new textures, %zu pieces not decoded, %.0f ms\n", w.sector.c_str(),
+                       w.level, chunks.size(), tris, tex.size(), missing,
+                       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count());
+            }
+            printf("in all: %zu triangles, %zu textures (%.1f MB as RGBA8)\n", totalTris, totalTex, double(texBytes) / 1048576.0);
             return 0;
         }
         fprintf(stderr, "unknown command\n");
