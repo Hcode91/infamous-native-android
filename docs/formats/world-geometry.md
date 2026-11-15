@@ -66,17 +66,57 @@ level of detail it is 676 pieces and 86,599 triangles; 32 more pieces use meshes
 **Verified** on sector `A1`: in every record found, the highest index equals the vertex count minus one.
 Drawn untextured, the result is recognisable architecture (columns, a stepped plinth, a tower).
 
-**Approximate:** the vertex size of the first stream is not read from the record yet. The reader tries
-12, 16, 20, 24 and 28 bytes and accepts the first for which every position lies inside the record's
-bounding box. In `A1` this decodes 243 of 261 meshes; the other 18 are skipped (decals and trees among
-them).
+**Vertex layouts.** The record does not describe its vertices: the layout follows from the material's
+effect. A material (shader object) names its effect at word 4 (+0x10), as an object id; the effects
+themselves are compiled programs in `all_shaders.xpp` (class `FxFile`, 159 of them), whose vertex inputs
+are named there (for example `vs0.i_pos`, `vs0.i_normal_uAmbient`, `vs0.i_uv` for `deferred_object`).
 
-The same heuristic applies to the second stream: 14 or 18 bytes is chosen by the space the stream occupies
-and by whether the values read as plausible coordinates. Checked by eye on a sign (its face maps onto the
-whole sign texture) and by a rough software render of the sector.
+The size of each stream was measured for every effect over all sector packs, from the space between a
+stream's pointer and the next pointer target (streams start on 16-byte boundaries, so the size is exact
+whenever less than 16 bytes are left over). Every effect uses one pair of sizes; for the common ones
+thousands of records agree. Texture coordinate columns were then picked by their value ranges and checked
+by eye. The engine's table (`engine/assets/vertex_layout.cpp`) holds the result; the main rows:
 
-**Not known:** the flags, the packed vectors, materials of other shader classes, what the piece flags
-mean, the vertex layout of decals and trees, and the further tables of a static object (offsets 0xC8 on).
+| Effect (examples) | Stream A | Stream B | Texture coordinates |
+|---|---|---|---|
+| `deferred_normal_specular_map`, `..._hsv_shift`, `deferred_normal_map` | 12: position | 14 | B + 8, half2 |
+| `deferred_splat_normal_*` | 12 | 18 | B + 8 |
+| `deferred_prelit`, `deferred_and_prelit_mask`, `deferred_scroll_*` | 12 | 12: half4 normal, uv | B + 8 |
+| `deferred_object` | 24: position, half4 normal, uv | - | A + 20 |
+| `deferred_decal_specular` | 20: position, packed normal, uv | - | A + 16 |
+| `deferred_decal_normal_specular` | 26: position, packed normal, uv, sign, packed tangent | - | A + 16 |
+| `deferred_cutout` | 16 | 8 | A + 12 |
+| `deferred_normal_specular_cutout`, `deferred_normal_map_cutout` | 16 | 16 | A + 12 |
+| `glass_new`, `reflect` | 26 | - | A + 20 |
+| `deferred_tree_leaf` | 16: half3 position, half3 centre, uv | 4 | A + 12 |
+| `deferred_tree_frond` | 10: half3 position, uv | 4 | A + 6 |
+| `deferred_tree_branch` | 6: half3 position | 12: float2 uv, packed normal | B + 0, float2 |
+
+Positions are three big-endian floats except in the tree effects, which use half-floats. When the effect
+name is not known (no `oid_manifest.txt`), the layouts whose sizes fit the streams exactly are tried. In all
+cases the decoded positions must lie inside the record's bounding box.
+
+Effects named `deferred_light_*` and `ambient_occluder_*` are light volumes and occlusion shapes, not
+surfaces; the viewer does not draw them. Effects with `decal` in the name are drawn over other surfaces;
+those with `cutout` (and tree leaves and fronds) are alpha-tested.
+
+**Verified** on sectors A1, B12, C5 and A16: every piece in them now has a decoded mesh (A1: 915 pieces,
+of which 718 at the nearest level of detail; B12: 7,378; C5: 5,420; A16: 6,673). C5 rendered untextured
+shows its buildings, park trees, poles and wires in place.
+
+**Piece flags** (the top three bits of the mesh index in a piece entry) are decal layers: every piece with
+non-zero flags uses a decal effect (in four sectors: 521 pieces with 1, 240 with 2, 35 with 3, 33 with 4,
+9 with 5, 3 with 6), on gravel, debris, road and grime decals that overlap each other. The viewer draws
+decals after everything else, lowest layer first.
+
+**Culling tree.** Static objects have further tables from +0xC8: 16-byte nodes `0x02000000 | size`, an
+8-byte compressed box, and a pointer to the child nodes. The box format matches the one the game's
+visibility job decodes (byte 0 shift for the centre, bytes 1-3 signed centre, byte 4 shift for the
+extent, bytes 5-7 extent). The viewer does its own culling and does not need it; not decoded further.
+
+**Not known:** what the last field of a piece entry (a negative 16-bit number) is, and the vertex
+layouts of a few rare effects (`rip_*`, `deep_water_flat`, `glass_outside`, `deferred_splat_map`,
+`deferred_divot`), whose positions decode but whose texture coordinates are not located.
 
 ## The city: hex cells
 

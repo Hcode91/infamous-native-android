@@ -259,12 +259,13 @@ bool VkRenderer::init(ANativeWindow* window) {
     if (r != VK_SUCCESS) return fail("vkCreateGraphicsPipelines", r);
 
     // Mesh pipeline: position + normal vertices, one matrix as a push constant, depth tested, two-sided.
-    VkPushConstantRange mpc{VK_SHADER_STAGE_VERTEX_BIT, 0, 64};
+    // vertex: the matrix; fragment: the draw mode (opaque, cutout, decal)
+    const VkPushConstantRange mpc[2] = {{VK_SHADER_STAGE_VERTEX_BIT, 0, 64}, {VK_SHADER_STAGE_FRAGMENT_BIT, 64, 4}};
     VkPipelineLayoutCreateInfo mli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     mli.setLayoutCount = 1;
     mli.pSetLayouts = &setLayout_;
-    mli.pushConstantRangeCount = 1;
-    mli.pPushConstantRanges = &mpc;
+    mli.pushConstantRangeCount = 2;
+    mli.pPushConstantRanges = mpc;
     if ((r = vkCreatePipelineLayout(dev_, &mli, nullptr, &meshLayout_)) != VK_SUCCESS) return fail("mesh pipeline layout", r);
     smi.codeSize = sizeof(mesh_vert_spv);
     smi.pCode = mesh_vert_spv;
@@ -290,6 +291,31 @@ bool VkRenderer::init(ANativeWindow* window) {
     gpi.pVertexInputState = &mvi;
     gpi.layout = meshLayout_;
     r = vkCreateGraphicsPipelines(dev_, VK_NULL_HANDLE, 1, &gpi, nullptr, &meshPipeline_);
+    if (r == VK_SUCCESS) {
+        // Decals: blended over what is already drawn, pulled slightly towards the camera, no depth writes.
+        VkPipelineColorBlendAttachmentState dba{};
+        dba.blendEnable = VK_TRUE;
+        dba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        dba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        dba.colorBlendOp = VK_BLEND_OP_ADD;
+        dba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        dba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        dba.alphaBlendOp = VK_BLEND_OP_ADD;
+        dba.colorWriteMask = 0xF;
+        VkPipelineColorBlendStateCreateInfo dcb = cb;
+        dcb.pAttachments = &dba;
+        VkPipelineRasterizationStateCreateInfo drs = rs;
+        drs.depthBiasEnable = VK_TRUE;
+        drs.depthBiasConstantFactor = -2.0f;
+        drs.depthBiasSlopeFactor = -2.0f;
+        VkPipelineDepthStencilStateCreateInfo dds = ds;
+        dds.depthWriteEnable = VK_FALSE;
+        VkGraphicsPipelineCreateInfo dpi2 = gpi;
+        dpi2.pColorBlendState = &dcb;
+        dpi2.pRasterizationState = &drs;
+        dpi2.pDepthStencilState = &dds;
+        r = vkCreateGraphicsPipelines(dev_, VK_NULL_HANDLE, 1, &dpi2, nullptr, &decalPipeline_);
+    }
     vkDestroyShaderModule(dev_, vs, nullptr);
     vkDestroyShaderModule(dev_, fs, nullptr);
     if (r != VK_SUCCESS) return fail("mesh pipeline", r);
@@ -813,7 +839,16 @@ bool VkRenderer::drawFrame() {
         const VkDeviceSize zero = 0;
         vkCmdBindVertexBuffers(cmd_, 0, 1, &vbuf_, &zero);
         vkCmdBindIndexBuffer(cmd_, ibuf_, 0, VK_INDEX_TYPE_UINT32);
+        // Batches arrive in draw order: opaque, cutout, then decals.
+        bool decalBound = false;
         for (const Batch& b : batches_) {
+            if (b.mode == 3) continue;   // invisible
+            if (b.mode == 2 && !decalBound && decalPipeline_) {
+                vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, decalPipeline_);
+                decalBound = true;
+            }
+            const int32_t mode = int32_t(b.mode);
+            vkCmdPushConstants(cmd_, meshLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 64, 4, &mode);
             VkDescriptorSet set = greyTexture_.set;
             if (b.texture < sceneTextures_.size() && sceneTextures_[b.texture].set) set = sceneTextures_[b.texture].set;
             vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, meshLayout_, 0, 1, &set, 0, nullptr);
@@ -871,6 +906,8 @@ void VkRenderer::shutdown() {
         if (repeatSampler_) vkDestroySampler(dev_, repeatSampler_, nullptr);
         repeatSampler_ = VK_NULL_HANDLE;
         if (meshPipeline_) vkDestroyPipeline(dev_, meshPipeline_, nullptr);
+        if (decalPipeline_) vkDestroyPipeline(dev_, decalPipeline_, nullptr);
+        decalPipeline_ = VK_NULL_HANDLE;
         if (meshLayout_) vkDestroyPipelineLayout(dev_, meshLayout_, nullptr);
         meshPipeline_ = VK_NULL_HANDLE;
         meshLayout_ = VK_NULL_HANDLE;

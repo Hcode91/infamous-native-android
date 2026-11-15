@@ -2,7 +2,7 @@
 //   ina_tool list <archive.psarc_s>
 //   ina_tool packs <archive.psarc_s>                    summary of every pack
 //   ina_tool textures <archive.psarc_s> <pack name> <out dir> [oid_manifest.txt]
-//   ina_tool meshes <archive.psarc_s> <pack name> [out.obj] [archive holding core.xpp]   a sector, assembled
+//   ina_tool meshes <archive.psarc_s> <pack name> [out.obj] [archive holding core.xpp] [oid_manifest.txt]   a sector, assembled
 //   ina_tool city <archive holding EMPIRE.xpp> [out.obj] [oid_manifest.txt]             the far-away city and its hex cells
 #include "assets/hex_map.h"
 #include "assets/pack.h"
@@ -46,7 +46,7 @@ static const char* formatName(PixelFormat f) {
 int main(int argc, char** argv) {
     if (argc < 3) {
         fprintf(stderr, "usage: ina_tool list|packs <archive>\n       ina_tool textures <archive> <pack> <out dir> [oid_manifest.txt]\n"
-                        "       ina_tool meshes <archive> <pack> [out.obj] [archive holding core.xpp]\n"
+                        "       ina_tool meshes <archive> <pack> [out.obj] [archive holding core.xpp] [oid_manifest.txt]\n"
                         "       ina_tool city <archive> [out.obj] [oid_manifest.txt]\n");
         return 2;
     }
@@ -141,17 +141,21 @@ int main(int argc, char** argv) {
                     shared = std::make_unique<SharedGeometry>(*core);
                 }
             }
-            size_t skipped = 0, tris = 0, verts = 0, withUv = 0, withTex = 0, borrowed = 0;
-            const auto meshes = readStaticMeshes(p, &skipped, shared.get());
+            // oid_manifest.txt: the 6th argument of meshes, the 4th of city
+            const char* namesPath = city ? (argc > 4 ? argv[4] : nullptr) : (argc > 6 ? argv[6] : nullptr);
+            const auto names = namesPath ? loadNames(namesPath) : std::vector<std::string>();
+            size_t skipped = 0, tris = 0, verts = 0, withUv = 0, withTex = 0, borrowed = 0, decals = 0, invisible = 0;
+            const auto meshes = readStaticMeshes(p, &skipped, shared.get(), names.empty() ? nullptr : &names);
             for (const auto& m : meshes) {
                 tris += m.indices.size() / 3;
                 verts += m.positions.size() / 3;
                 withUv += !m.uvs.empty();
                 withTex += m.colorTextureOid != 0;
                 borrowed += m.shared;
+                decals += m.mode == DrawMode::Decal;
+                invisible += m.mode == DrawMode::Invisible;
             }
             if (city) {
-                const auto names = argc > 4 ? loadNames(argv[4]) : std::vector<std::string>();
                 const auto cells = readHexCells(p);
                 printf("%zu hex cells\n", cells.size());
                 for (const HexCell& c : cells)
@@ -167,8 +171,8 @@ int main(int argc, char** argv) {
             const float zero[3] = {0, 0, 0};
             for (const auto& in : instances) {
                 const StaticMesh& m = meshes[in.mesh];
-                if (in.flags != 0 || (!city && m.lodMin != 0)) continue;
-                builder.add(m, in.matrix.data(), zero);
+                if (!city && m.lodMin != 0) continue;
+                builder.add(m, in.matrix.data(), zero, uint8_t(in.flags));
             }
             const size_t placedPieces = builder.pieces(), placedTris = builder.triangles();
             const Scene scene = builder.finish();
@@ -192,6 +196,7 @@ int main(int argc, char** argv) {
                    p.objects().size(), p.pointerOffsets().size(), meshes.size(), borrowed, skipped, tris, verts);
             printf("%zu meshes with texture coordinates, %zu with a colour texture; pack lends %zu buffer sets and borrows %zu\n", withUv,
                    withTex, p.geometryExports().size(), p.geometryImports().size());
+            if (!names.empty()) printf("%zu decal meshes, %zu light volumes (not drawn)\n", decals, invisible);
             return 0;
         }
         fprintf(stderr, "unknown command\n");

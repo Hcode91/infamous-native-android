@@ -12,6 +12,7 @@ add_library(ina_core STATIC
     engine/assets/texture.cpp
     engine/assets/world_mesh.cpp
     engine/assets/hex_map.cpp
+    engine/assets/vertex_layout.cpp
     engine/world/scene.cpp
     engine/core/png.cpp)
 target_include_directories(ina_core PUBLIC engine)

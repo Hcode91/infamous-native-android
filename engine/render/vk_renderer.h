@@ -23,6 +23,7 @@ public:
     // set it is drawn instead of the image; an empty scene goes back to the image.
     struct Batch {
         uint32_t firstIndex = 0, indexCount = 0, texture = 0xFFFFFFFFu;
+        uint32_t mode = 0;   // 0 opaque, 1 cutout (alpha-tested), 2 decal (blended); give batches in that order
     };
     struct SceneTexture {
         uint32_t width = 0, height = 0;
@@ -63,6 +64,7 @@ private:
     VkPipeline pipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout meshLayout_ = VK_NULL_HANDLE;
     VkPipeline meshPipeline_ = VK_NULL_HANDLE;
+    VkPipeline decalPipeline_ = VK_NULL_HANDLE;
     VkFormat depthFormat_ = VK_FORMAT_D32_SFLOAT;
     VkImage depth_ = VK_NULL_HANDLE;
     VkDeviceMemory depthMem_ = VK_NULL_HANDLE;

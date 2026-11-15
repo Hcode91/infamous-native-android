@@ -8,6 +8,7 @@
 #include "core/bytes.h"
 
 #include <zlib.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -404,6 +405,87 @@ int main() {
             CHECK(s.boxMin[0] == 999.0f && s.boxMax[1] == 51.0f);
             CHECK(std::fabs(s.vertices[5] - 0.7071f) < 0.001f && std::fabs(s.vertices[4] + 0.7071f) < 0.001f);   // unit normal of the triangle
         }
+    }
+    // Vertex layouts: the material's effect names the layout. A 26-byte decal vertex (float3 position,
+    // packed normal, half2 uv, ...) and a tree leaf (half3 position, half2 uv at +12).
+    {
+        auto put = [](std::vector<uint8_t>& r, size_t o, uint32_t v) { r[o] = uint8_t(v >> 24); r[o + 1] = uint8_t(v >> 16); r[o + 2] = uint8_t(v >> 8); r[o + 3] = uint8_t(v); };
+        auto putf = [&](std::vector<uint8_t>& r, size_t o, float f) { uint32_t u; memcpy(&u, &f, 4); put(r, o, u); };
+        auto puth = [](std::vector<uint8_t>& r, size_t o, uint16_t h) { r[o] = uint8_t(h >> 8); r[o + 1] = uint8_t(h); };
+        std::vector<uint8_t> r0(0x400, 0);
+        const uint32_t matA = 0x20, matB = 0x40, recA = 0x100, recB = 0x160, vbA = 0x200, vbB = 0x280, vbB2 = 0x2C0, ibAt = 0x300;
+        put(r0, matA + 16, 5);   // effect name id 5
+        put(r0, matB + 16, 6);   // effect name id 6
+        const std::vector<std::string> names = {"", "", "", "", "", "deferred_decal_normal_specular", "deferred_tree_leaf"};
+        const float verts[3][3] = {{0, 0, 0}, {10, 0, 0}, {0, 10, 4}};
+        for (int v = 0; v < 3; v++) {
+            for (int c = 0; c < 3; c++) putf(r0, vbA + size_t(v) * 26 + size_t(c) * 4, verts[v][c]);
+            put(r0, vbA + size_t(v) * 26 + 12, 0x7FC00000);       // packed normal: NaN if read as a float
+            puth(r0, vbA + size_t(v) * 26 + 16, 0x3800);          // u = 0.5
+            puth(r0, vbA + size_t(v) * 26 + 18, 0x3C00);          // v = 1.0
+            const uint16_t hpos[3][3] = {{0, 0, 0}, {0x4900, 0, 0}, {0, 0x4900, 0x4400}};   // 10, 10, 4 as halves
+            for (int c = 0; c < 3; c++) puth(r0, vbB + size_t(v) * 16 + size_t(c) * 2, hpos[v][c]);
+            puth(r0, vbB + size_t(v) * 16 + 12, 0x3C00);          // u = 1.0
+        }
+        r0[ibAt + 3] = 1; r0[ibAt + 5] = 2;
+        for (uint32_t rec : {recA, recB}) {
+            put(r0, rec, 1); put(r0, rec + 4, 1u << 16 | 3); put(r0, rec + 8, rec == recA ? matA : matB);
+            const float box[6] = {0, 0, 0, 10, 10, 4};
+            for (int i = 0; i < 6; i++) putf(r0, rec + 0x10 + size_t(i) * 4, box[i]);
+            const uint32_t a = rec == recA ? vbA : vbB;
+            put(r0, rec + 0x34, a); put(r0, rec + 0x38, a);
+            if (rec == recB) { put(r0, rec + 0x3C, vbB2); put(r0, rec + 0x40, vbB2); }   // second (normal) stream
+            else { put(r0, rec + 0x40, 0xFFFFFFFFu); }
+            put(r0, rec + 0x48, 0xFFFFFFFFu);
+            put(r0, rec + 0x4C, ibAt); put(r0, rec + 0x50, ibAt);
+            put(r0, rec + 0x54, 3);
+        }
+        auto w = [](uint32_t off) { return uint16_t(off / 4); };
+        const std::vector<uint8_t> fix = makeFixups({0xC000, w(recA + 8), w(recA + 0x34), w(recA + 0x38), w(recA + 0x4C), w(recA + 0x50),
+                                                     w(recB + 8), w(recB + 0x34), w(recB + 0x38), w(recB + 0x3C), w(recB + 0x40),
+                                                     w(recB + 0x4C), w(recB + 0x50)});
+        std::vector<uint8_t> dir;
+        be32(dir, 0); be32(dir, 0);
+        const std::vector<uint8_t> file = makePackFromSegments({{1, 0x10, r0}, {6, 4, dir}, {2, 4, fix}});
+        Pack p(file);
+        size_t skipped = 9;
+        auto meshes = readStaticMeshes(p, &skipped, nullptr, &names);
+        CHECK(meshes.size() == 2 && skipped == 0);
+        std::sort(meshes.begin(), meshes.end(), [](const StaticMesh& a, const StaticMesh& b) { return a.recordOffset < b.recordOffset; });
+        if (meshes.size() == 2) {
+            const StaticMesh& d = meshes[0];
+            CHECK(d.effectOid == 5 && d.mode == DrawMode::Decal && d.vertexStride == 26);
+            CHECK(d.positions.size() == 9 && d.positions[3] == 10.0f && d.positions[8] == 4.0f);
+            CHECK(d.uvs.size() == 6 && d.uvs[0] == 0.5f && d.uvs[1] == 1.0f);
+            const StaticMesh& l = meshes[1];
+            CHECK(l.effectOid == 6 && l.mode == DrawMode::Cutout && l.vertexStride == 16);
+            CHECK(l.positions.size() == 9 && l.positions[3] == 10.0f && l.positions[7] == 10.0f && l.positions[8] == 4.0f);
+            CHECK(l.uvs.size() == 6 && l.uvs[0] == 1.0f);
+            // scene order: opaque first, cutout, then decals by layer; light volumes are left out
+            SceneBuilder b;
+            const float id[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}, zero[3] = {0, 0, 0};
+            StaticMesh lightVolume = l;
+            lightVolume.mode = DrawMode::Invisible;
+            StaticMesh plain = l;
+            plain.mode = DrawMode::Opaque;
+            b.add(d, id, zero, 2);
+            b.add(l, id, zero);
+            b.add(lightVolume, id, zero);
+            b.add(plain, id, zero);
+            b.add(d, id, zero, 1);
+            CHECK(b.pieces() == 4);
+            const Scene s = b.finish();
+            CHECK(s.batches.size() == 4);
+            if (s.batches.size() == 4) {
+                CHECK(s.batches[0].mode == DrawMode::Opaque && s.batches[1].mode == DrawMode::Cutout);
+                CHECK(s.batches[2].mode == DrawMode::Decal && s.batches[2].layer == 1 && s.batches[3].layer == 2);
+            }
+        }
+        // without names the stream sizes still choose the layout (the decal's 26 bytes fit exactly)
+        meshes = readStaticMeshes(p, &skipped);
+        CHECK(meshes.size() == 2 && skipped == 0);
+        CHECK(layoutForEffect("deferred_normal_specular_map") && layoutForEffect("deferred_normal_specular_map")->strideB == 14);
+        CHECK(!layoutForEffect("no_such_effect") && drawModeForEffect("deferred_light_spot") == DrawMode::Invisible);
     }
     (void)bef;
     printf(failures ? "%d FAILED\n" : "all tests passed\n", failures);

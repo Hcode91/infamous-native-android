@@ -2,10 +2,12 @@
 // See docs/formats/world-geometry.md.
 #pragma once
 #include "assets/pack.h"
+#include "assets/vertex_layout.h"
 
 #include <array>
 #include <cstdint>
 #include <utility>
+#include <string>
 #include <vector>
 
 namespace ina {
@@ -20,6 +22,8 @@ struct StaticMesh {
     uint16_t flags = 0;                        // low half of record word 1: 3 for most meshes, 1 for decals
     uint8_t lodMin = 0, lodMax = 0;            // range of detail levels the mesh is drawn at; 0 is nearest
     bool shared = false;                       // vertex data borrowed from the shared pack
+    uint32_t effectOid = 0;                    // the material's effect (vertex and fragment programs), by name id
+    DrawMode mode = DrawMode::Opaque;          // from the effect name when names are given
     uint32_t vertexStride = 0;            // bytes per vertex in the position stream
     std::vector<float> positions;         // x, y, z per vertex with `origin` added; z is up
     std::vector<float> uvs;               // u, v per vertex; empty when the layout was not recognised
@@ -66,6 +70,8 @@ private:
 // Finds and decodes every static mesh record in a pack. Records whose vertex layout cannot be confirmed
 // are skipped and counted in `skipped` when it is given. Records that borrow their buffers are decoded
 // when `shared` holds them, and count as skipped otherwise.
-std::vector<StaticMesh> readStaticMeshes(const Pack& pack, size_t* skipped = nullptr, const SharedGeometry* shared = nullptr);
+// `names` (the lines of oid_manifest.txt) lets the effect name pick the vertex layout and draw mode.
+std::vector<StaticMesh> readStaticMeshes(const Pack& pack, size_t* skipped = nullptr, const SharedGeometry* shared = nullptr,
+                                         const std::vector<std::string>* names = nullptr);
 
 }  // namespace ina

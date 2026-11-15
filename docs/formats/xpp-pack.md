@@ -96,6 +96,13 @@ laid out one after another from the start of the data area; the chunks of every 
 - A pointer's value is an offset into the data area and lands inside the list's target region. Checked
   on three packs of different sizes: every pointer in lists 0 and 1 lands in its region.
 
+`SPLP` links compiled scripts to object properties. Body: three counts, then entries of three words:
+the data-area offset of a word inside an object's script bytecode, a class id, and a property name (an
+object id; for example `MODES`, `FIELD_OF_VIEW`, `PRIORITY` with class `CameraVolume`). The word at the
+offset is an instruction whose operand the game presumably fills in with that property's position in the
+class at load time. This shows that objects carry bytecode scripts that read and write named properties.
+The script instruction set is not decoded.
+
 `GLOB` shares vertex and index buffers between packs by a 16-byte hash (what is hashed is not known):
 
 - Body: `u32 E` (buffer sets this pack lends), `u32 I` (buffer sets it borrows), then `E + I` hashes of
@@ -116,9 +123,9 @@ See [world-geometry.md](world-geometry.md).
 ## Not yet known
 
 - The remaining header fields (0x08-0x2B) and the tables between the segment table and the data area.
-- The `SPLP` chunk and the lists that target the fixup region (probably references to objects in other
-  packs).
-- What the 16-byte hash of the `GLOB` chunk is computed from.
+- The lists that target the fixup region (probably references to objects in other packs).
+- What the 16-byte hash of the `GLOB` chunk is computed from (not MD5 of the stored buffers in any
+  simple combination tried). Not needed: buffers are matched by the stored hash.
 - The layout of every other object class: materials, skeletons, animations, collision, world sectors,
   scripts.
 - The cube map face order.

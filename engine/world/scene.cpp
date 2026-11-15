@@ -5,10 +5,13 @@
 
 namespace ina {
 
-void SceneBuilder::add(const StaticMesh& m, const float tm[12], const float offset[3]) {
+void SceneBuilder::add(const StaticMesh& m, const float tm[12], const float offset[3], uint8_t layer) {
     const size_t nv = m.positions.size() / 3;
-    if (nv == 0 || m.indices.empty()) return;
-    Group& g = groups_[m.uvs.empty() ? 0u : m.colorTextureOid];
+    if (nv == 0 || m.indices.empty() || m.mode == DrawMode::Invisible) return;
+    DrawMode mode = layer ? DrawMode::Decal : m.mode;
+    // order: 0 opaque, 1 cutout, 2 + layer for decals
+    const uint32_t order = mode == DrawMode::Decal ? 2u + layer : (mode == DrawMode::Cutout ? 1u : 0u);
+    Group& g = groups_[{order, m.uvs.empty() ? 0u : m.colorTextureOid}];
     std::vector<float> placed(nv * 3);
     float sum[3] = {0, 0, 0};
     for (size_t v = 0; v < nv; v++) {
@@ -48,12 +51,14 @@ Scene SceneBuilder::finish() {
     Scene s;
     s.pieces = pieces_;
     bool first = true;
-    for (auto& [oid, g] : groups_) {
+    for (auto& [key, g] : groups_) {
         const uint32_t base = uint32_t(s.vertices.size() / 8);
         SceneBatch b;
         b.firstIndex = uint32_t(s.indices.size());
         b.indexCount = uint32_t(g.indices.size());
-        b.textureOid = oid;
+        b.textureOid = key.second;
+        b.mode = key.first >= 2 ? DrawMode::Decal : (key.first == 1 ? DrawMode::Cutout : DrawMode::Opaque);
+        b.layer = key.first >= 2 ? uint8_t(key.first - 2) : 0;
         s.batches.push_back(b);
         for (size_t v = 0; v + 7 < g.vertices.size(); v += 8) {
             for (int c = 0; c < 3; c++) {

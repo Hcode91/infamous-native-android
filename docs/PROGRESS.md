@@ -1,6 +1,6 @@
 # Progress report
 
-Last updated: 2026-11-15. Tested against the EU disc release (BCES00220).
+Last updated: 2026-11-15 (evening). Tested against the EU disc release (BCES00220).
 
 ## Verified
 
@@ -11,7 +11,8 @@ Last updated: 2026-11-15. Tested against the EU disc release (BCES00220).
 | Textures | All 15,437 descriptors parsed (3,869 distinct names); DXT1, DXT5 and ARGB8 decode to RGBA8 |
 | Object model | Directory, class ids, object names and pointer fixups decoded: about 123,000 objects in 159 classes |
 | Android app | Run on a Galaxy S23: import works and textures display correctly |
-| Static world geometry | Sector meshes decode (positions, triangles, texture coordinates); 243 of 261 in sector A1. Vertex sizes are found by checks on the data, not yet read from the record |
+| Static world geometry | Every piece of the sectors tested decodes. Vertex layouts come from each material's effect (table measured over all sectors), including decals and trees |
+| Decals | Decal effects and decal layers (the piece flags) identified; drawn blended in layer order |
 | Shared geometry | Meshes that borrow their buffers from the shared pack resolve by hash: all 35,590 such records in the game have a lender |
 | Levels of detail | Each mesh's range of levels is read from its record; a sector is drawn at the nearest level |
 | Placement inside a sector | Piece and transform tables decoded; sector A1 assembles into a coherent waterfront |
@@ -28,7 +29,8 @@ Last updated: 2026-11-15. Tested against the EU disc release (BCES00220).
 | Area | State |
 |---|---|
 | Skinned model geometry | Bit-packed positions unpack into correct limb shapes, but the per-piece scale and offset are unknown |
-| Vertex layouts | Decals and trees use layouts that are not decoded; about 2% to 10% of a sector's pieces are missing for this reason |
+| Characters | Joint hierarchy (211 joints, bind matrices, pose) and per-piece joint palettes found; a figure assembles in a T pose but with wrong proportions. See docs/formats/characters.md |
+| Scripts | Objects carry bytecode scripts; the SPLP fixup chunk links their instructions to named properties. Instruction set not decoded |
 
 ## Built but not yet run on a device
 
@@ -39,8 +41,9 @@ Last updated: 2026-11-15. Tested against the EU disc release (BCES00220).
 
 ## Not started
 
-Materials, shaders, skeletons, animation, collision, world sectors and streaming, the game's
-scripts and mission logic, physics, AI, audio, input, save data, touch controls, graphics presets.
+Shaders (beyond their vertex layouts), animation, collision and navigation, lights, particles, streaming,
+the script instruction set and mission logic, physics, AI, audio, text, input, save data, touch controls,
+graphics presets. docs/formats/object-classes.md lists where each lives.
 
 ## Known problems and limits
 
@@ -59,7 +62,8 @@ None yet. No figure will be reported here until it has been measured on a device
 
 ## Next
 
-1. Run the sector-in-city and whole-city views on a device.
-2. Several sectors in detail at once, chosen by distance, with culling: the start of streaming.
-3. Read vertex layouts from the data instead of testing sizes; decals and trees.
-4. Solve the scale and offset of skinned pieces, to assemble a character.
+1. Run the current build on a device (decals, trees, the city views).
+2. Characters: the space packed positions are stored in, then skinning in the bind pose.
+3. Several sectors in detail at once, with culling: the start of streaming.
+4. Lights (LightData) and collision (ShapeData, PathMeshData).
+5. The script instruction set.

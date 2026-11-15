@@ -202,11 +202,11 @@ std::string buildWorld(const Pack* sector, const std::string& sectorName) {
     std::vector<float> centers;
     std::vector<StaticMesh> meshes;
     if (sector) {
-        meshes = readStaticMeshes(*sector, nullptr, g.shared.get());
+        meshes = readStaticMeshes(*sector, nullptr, g.shared.get(), g.names.empty() ? nullptr : &g.names);
         for (const MeshInstance& in : readMeshInstances(*sector, meshes, &missingPieces)) {
             const StaticMesh& m = meshes[in.mesh];
-            if (in.flags != 0 || m.lodMin != 0) continue;   // ordinary pieces, at the nearest level of detail
-            builder.add(m, in.matrix.data(), offset);
+            if (m.lodMin != 0) continue;   // the nearest level of detail; piece flags are decal layers
+            builder.add(m, in.matrix.data(), offset, uint8_t(in.flags));
         }
         sectorPieces = builder.pieces();
         sectorTriangles = builder.triangles();
@@ -215,8 +215,8 @@ std::string buildWorld(const Pack* sector, const std::string& sectorName) {
     if (!sector || placed) {
         for (const MeshInstance& in : g.cityPieces) {
             const StaticMesh& m = g.cityMeshes[in.mesh];
-            if (in.flags != 0 || (sector && m.nameOid == sectorOid)) continue;
-            builder.add(m, in.matrix.data(), zero);
+            if (sector && m.nameOid == sectorOid) continue;
+            builder.add(m, in.matrix.data(), zero, uint8_t(in.flags));
         }
     }
     const size_t pieces = builder.pieces(), triangles = builder.triangles();
@@ -258,7 +258,7 @@ std::string buildWorld(const Pack* sector, const std::string& sectorName) {
                 }
             }
         }
-        batches.push_back({b.firstIndex, b.indexCount, slot});
+        batches.push_back({b.firstIndex, b.indexCount, slot, uint32_t(b.mode)});
     }
 
     if (sector && centers.size() >= 3) {
@@ -355,7 +355,7 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_open(JNIEnv* env, jc
             for (const TextureInfo& t : g.city->textures())
                 if (t.format != PixelFormat::Unknown && !t.cube) g.cityTextures[t.oid] = t;
             g.cells = readHexCells(*g.city);
-            g.cityMeshes = readStaticMeshes(*g.city, nullptr, g.shared.get());
+            g.cityMeshes = readStaticMeshes(*g.city, nullptr, g.shared.get(), g.names.empty() ? nullptr : &g.names);
             g.cityPieces = readMeshInstances(*g.city, g.cityMeshes, nullptr, kHexMapClass);
             break;
         }

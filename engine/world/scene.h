@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <map>
+#include <utility>
 #include <vector>
 
 namespace ina {
@@ -12,6 +13,8 @@ namespace ina {
 struct SceneBatch {
     uint32_t firstIndex = 0, indexCount = 0;
     uint32_t textureOid = 0;      // 0: untextured
+    DrawMode mode = DrawMode::Opaque;
+    uint8_t layer = 0;            // decals: stacking order, drawn lowest first
 };
 
 struct Scene {
@@ -25,7 +28,9 @@ struct Scene {
 class SceneBuilder {
 public:
     // Adds one copy of `mesh`, transformed by the 3x4 row-major `matrix` and then moved by `offset`.
-    void add(const StaticMesh& mesh, const float matrix[12], const float offset[3]);
+    // `layer` is the piece's decal layer (the piece flags); a non-zero layer draws the piece as a decal.
+    // Invisible meshes (light volumes) are skipped.
+    void add(const StaticMesh& mesh, const float matrix[12], const float offset[3], uint8_t layer = 0);
     size_t pieces() const { return pieces_; }
     size_t triangles() const { return triangles_; }
     // Centre points of the pieces added so far (x, y, z each), for aiming a camera.
@@ -37,7 +42,8 @@ private:
         std::vector<float> vertices;
         std::vector<uint32_t> indices;
     };
-    std::map<uint32_t, Group> groups_;   // by texture oid
+    // by draw order (opaque, cutout, then decals by layer), then texture oid
+    std::map<std::pair<uint32_t, uint32_t>, Group> groups_;
     std::vector<float> centers_;
     size_t pieces_ = 0, triangles_ = 0;
 };
