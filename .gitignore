@@ -1,0 +1,13 @@
+build*/
+.gradle/
+android/app/.cxx/
+android/local.properties
+*.apk
+# Game data never belongs in this repository.
+*.psarc
+*.psarc_s
+*.xpp
+*.elf
+*.bin
+*.bik
+oid_manifest.txt

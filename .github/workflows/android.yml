@@ -1,0 +1,62 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host tests (no game data needed)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build zlib1g-dev
+          cmake -S . -B build-host -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-host
+          ctest --test-dir build-host --output-on-failure
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-34 build-tools;34.0.0 ndk;27.2.12479018 cmake;3.22.1"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build the ARM64 APK
+        run: gradle -p android --no-daemon assembleDebug 2>&1 | tee gradle.log
+
+      - name: Name the APK
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/debug/app-debug.apk "out/infamous-native-android-${GITHUB_RUN_NUMBER}.apk"
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: out/*.apk
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-logs
+          path: |
+            gradle.log
+            android/app/.cxx/**/*.log
+            android/app/build/outputs/logs/**
+          retention-days: 14

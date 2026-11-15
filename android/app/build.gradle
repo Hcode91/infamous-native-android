@@ -1,0 +1,51 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+}
+
+android {
+    namespace "io.github.hcode91.ina"
+    compileSdk 34
+    ndkVersion "27.2.12479018"
+
+    defaultConfig {
+        applicationId "io.github.hcode91.ina"
+        minSdk 26
+        targetSdk 34
+        versionCode((System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInteger())
+        versionName "0.1." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
+        ndk { abiFilters "arm64-v8a" }
+        externalNativeBuild {
+            cmake { arguments "-DANDROID_STL=c++_static" }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path file("../../CMakeLists.txt")
+            version "3.22.1"
+        }
+    }
+    signingConfigs {
+        // A fixed key kept in the repository so every CI build installs over the last one.
+        // It protects nothing: do not use it for a store release.
+        ci {
+            storeFile file("ci-debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
+    }
+    buildTypes {
+        debug { signingConfig signingConfigs.ci }
+        release {
+            signingConfig signingConfigs.ci
+            minifyEnabled false
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = "17" }
+}
+
