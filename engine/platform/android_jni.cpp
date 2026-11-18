@@ -19,6 +19,9 @@
 #include <thread>
 #include <vector>
 
+#include "anim/character_model.h"
+#include "anim/clip.h"
+#include "anim/leg_ik.h"
 #include "assets/character_mesh.h"
 #include "assets/collision.h"
 #include "assets/hex_map.h"
@@ -86,6 +89,17 @@ struct State {
     std::string groundSector;
     std::string loaderNote;                  // what the loader is doing
 
+    // A character being animated: built by the Person button, then owned by the render thread.
+    struct Actor {
+        std::unique_ptr<CharacterModel> model;
+        std::vector<AnimClip> clips;
+        std::vector<LegChain> legs;
+        std::vector<float> restWorld;
+        std::vector<float> vertices;         // scratch, the layout of model->scene().vertices
+    };
+    std::atomic<int> actorClip{-1};          // which clip the actor plays; -1: none (rest pose)
+    std::vector<std::string> actorClipNotes; // one line per clip, for the status text
+
     // loader thread -> render thread
     struct Job {
         enum Kind { Far, Add, Remove, Clear } kind = Add;
@@ -93,6 +107,7 @@ struct State {
         uint8_t level = 0;
         std::vector<Chunk> chunks;
         std::vector<std::pair<uint64_t, TextureImage>> textures;
+        std::shared_ptr<Actor> actor;        // with the "@character" sector
     };
     std::deque<Job> jobs;
     std::set<uint64_t> heldTextures;         // what the renderer holds (copied after each job)
@@ -149,6 +164,12 @@ std::map<std::string, std::vector<uint32_t>>& sectorChunks() {
     static std::map<std::string, std::vector<uint32_t>> m;
     return m;
 }
+// The animated character and its chunk, on the render thread.
+std::shared_ptr<State::Actor>& activeActor() {
+    static std::shared_ptr<State::Actor> a;
+    return a;
+}
+
 std::map<std::string, uint32_t>& farChunkIds() {
     static std::map<std::string, uint32_t> m;
     return m;
@@ -191,17 +212,40 @@ void applyJob(VkRenderer& r, State::Job& j) {
         for (const Chunk& ch : j.chunks) uploadChunk(r, ch, &ids);
         for (uint32_t id : sectors[j.sector]) r.removeChunk(id);   // the same sector at another level
         sectors[j.sector] = ids;
+        if (j.sector == "@character") activeActor() = j.actor;
     } else if (j.kind == State::Job::Remove) {
         for (uint32_t id : sectors[j.sector]) r.removeChunk(id);
         sectors.erase(j.sector);
+        if (j.sector == "@character") activeActor().reset();
     } else if (j.kind == State::Job::Clear) {
         r.clearChunks();
         sectors.clear();
         far.clear();
+        activeActor().reset();
     }
     // a sector held in detail hides its far-away stand-in
     for (const auto& [name, id] : far) r.setChunkVisible(id, !sectors.count(name));
     r.trimTextures(size_t(160) << 20);
+}
+
+// Poses the animated character for the time since it started and rewrites its vertices.
+void animateActor(VkRenderer& r, double seconds) {
+    auto& actor = activeActor();
+    if (!actor || !actor->model) return;
+    const auto it = sectorChunks().find("@character");
+    if (it == sectorChunks().end() || it->second.empty()) return;
+    const int pick = g.actorClip.load();
+    if (pick < 0 || size_t(pick) >= actor->clips.size()) return;
+    const AnimClip& clip = actor->clips[size_t(pick)];
+    const Skeleton& skel = actor->model->skeleton();
+    std::vector<float> pose = skel.restPose;
+    const float length = clip.duration();
+    const float t = length > 0 ? float(std::fmod(seconds, double(length))) : 0.0f;
+    clip.evaluate(t * clip.fps, pose);
+    const std::vector<float> world = poseToWorldWithLegs(skel, pose, actor->restWorld, actor->legs);
+    if (actor->vertices.size() != actor->model->scene().vertices.size()) actor->vertices = actor->model->scene().vertices;
+    actor->model->skin(world, actor->vertices);
+    r.updateChunkVertices(it->second[0], actor->vertices);
 }
 
 void renderLoop() {
@@ -211,6 +255,7 @@ void renderLoop() {
         g.renderError = r.error();
         return;
     }
+    const auto started = std::chrono::steady_clock::now();
     while (g.run.load()) {
         Image img;
         bool have = false;
@@ -247,6 +292,7 @@ void renderLoop() {
             }
             r.setCamera(target, yaw, pitch, distance);
         }
+        animateActor(r, std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
         if (!r.drawFrame()) {
             std::lock_guard<std::mutex> l(g.lock);
             g.renderError = r.error();
@@ -259,6 +305,7 @@ void renderLoop() {
     r.shutdown();
     sectorChunks().clear();
     farChunkIds().clear();
+    activeActor().reset();
 }
 
 void stopRender() {
@@ -648,6 +695,9 @@ JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_hideWorld(JNIEnv*, jcla
     g.overview = false;
     g.jobs.clear();
     g.held.clear();
+    g.characterShown = false;
+    g.actorClipNotes.clear();
+    g.actorClip.store(-1);
     State::Job j;
     j.kind = State::Job::Clear;
     g.jobs.push_back(std::move(j));
@@ -668,7 +718,7 @@ JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_camera(JNIEnv*, jclass,
     g.distance = std::clamp(g.distance * zoom, 2.0f, 400000.0f);
 }
 
-// Stands a character at the camera target, in its bind pose: the next variant (by `delta`) of the
+// Stands a character at the camera target and plays one of its pack's clips on it: the next variant (by `delta`) of the
 // character packs, moving on to the next pack after a pack's last variant.
 JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_character(JNIEnv* env, jclass, jint delta) {
     std::string msg;
@@ -707,32 +757,45 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_character(JNIEnv* en
         const std::string packName = g.archives[ref.archive]->entries()[ref.entry].name;
         const std::vector<PackedMesh> meshes = readPackedMeshes(*pack);
         const CharacterVariant* variant = g.characterVariant < variants.size() ? &variants[g.characterVariant] : nullptr;
-        SceneBuilder builder;
-        const float identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
-        size_t shown = 0;
+        std::vector<CharacterModel::Part> parts;
         for (const PackedMesh& m : meshes) {
             if (variant ? !variantShows(*variant, m) : m.optional) continue;
-            StaticMesh s;
-            s.nameOid = m.nameOid;
-            s.positions = m.positions;
-            s.uvs = m.uvs;
-            s.indices = m.indices;
+            CharacterModel::Part part;
+            part.mesh = m;
             if (m.materialOffset) {
                 for (const auto& [slot, oid] : readMaterialTextures(*pack, m.materialOffset))
-                    if (slot == 0) s.colorTextureOid = oid;
+                    if (slot == 0) part.textureOid = oid;
                 const uint32_t effect = size_t(m.materialOffset) + 20 <= pack->data().size() ? pack->word(size_t(m.materialOffset) + 16) : 0;
-                if (effect < g.names.size()) s.mode = drawModeForEffect(g.names[effect]);
-                if (s.mode == DrawMode::Decal || s.mode == DrawMode::Invisible) s.mode = DrawMode::Opaque;
+                if (effect < g.names.size()) part.mode = drawModeForEffect(g.names[effect]);
+                if (part.mode == DrawMode::Decal || part.mode == DrawMode::Invisible) part.mode = DrawMode::Opaque;
             }
-            builder.add(s, identity, at);
-            shown++;
+            parts.push_back(std::move(part));
         }
+        const size_t shown = parts.size();
+        auto actor = std::make_shared<State::Actor>();
+        Skeleton skel = readSkeleton(*pack);
+        actor->legs = findLegChains(skel, g.names);
+        actor->restWorld = poseToWorld(skel, skel.restPose);
+        actor->clips = readAnimClips(*pack);
+        actor->model = std::make_unique<CharacterModel>(std::move(parts), std::move(skel), at);
+        // start with the longest clip that moves a fair number of joints, if there is one
+        int best = -1;
+        std::vector<std::string> notes;
+        for (size_t i = 0; i < actor->clips.size(); i++) {
+            const AnimClip& c = actor->clips[i];
+            notes.push_back("clip " + std::to_string(i + 1) + " of " + std::to_string(actor->clips.size()) + ": " + std::to_string(c.frames) + " frames, " +
+                            std::to_string(c.channels.size()) + " moving channels");
+            if (c.channels.size() >= 8 && c.frames >= 30 && (best < 0 || c.frames > actor->clips[size_t(best)].frames)) best = int(i);
+        }
+        if (best < 0 && !actor->clips.empty()) best = 0;
+        if (!actor->model->skeleton().jointCount) best = -1;
         State::Job j;
         j.kind = State::Job::Add;
         j.sector = "@character";
+        j.actor = actor;
         Chunk ch;
-        const size_t triangles = builder.triangles();
-        ch.scene = builder.finish();
+        const size_t triangles = actor->model->triangles();
+        ch.scene = actor->model->scene();
         j.chunks.push_back(std::move(ch));
         const auto own = textureIndex(*pack);
         std::set<uint64_t> have;
@@ -743,15 +806,31 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_character(JNIEnv* en
         j.textures = decodeChunkTextures(j.chunks, {{pack.get(), &own}, {g.core.get(), &g.coreTextures}}, 512,
                                          [&](uint64_t k) { return have.count(k) != 0; });
         const size_t textures = j.textures.size();
+        const size_t clipCount = actor->clips.size();
         std::lock_guard<std::mutex> l(g.lock);
         g.jobs.push_back(std::move(j));
+        g.actorClipNotes = std::move(notes);
+        g.actorClip.store(best);
         g.distance = std::min(g.distance, 450.0f);
         msg = packName + (variant && variant->nameOid < g.names.size() ? "  " + g.names[variant->nameOid] : "") + "\n" + std::to_string(shown) +
-              " meshes, " + std::to_string(triangles) + " triangles, " + std::to_string(textures) + " new textures (bind pose)";
+              " meshes, " + std::to_string(triangles) + " triangles, " + std::to_string(textures) + " new textures\n" +
+              (best >= 0 ? g.actorClipNotes[size_t(best)] : clipCount ? "rest pose" : "no animation clips in this pack (rest pose)");
     } catch (const std::exception& e) {
         msg = std::string("ERROR ") + e.what();
     }
     return env->NewStringUTF(msg.c_str());
+}
+
+// Steps the clip the character plays by `delta`; past the last clip comes the rest pose, then the first again.
+JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_clip(JNIEnv* env, jclass, jint delta) {
+    std::lock_guard<std::mutex> l(g.lock);
+    const int count = int(g.actorClipNotes.size());
+    if (!g.characterShown || count == 0) return env->NewStringUTF("No character with animation clips is shown");
+    int pick = g.actorClip.load() + int(delta);
+    if (pick >= count) pick = -1;
+    if (pick < -1) pick = count - 1;
+    g.actorClip.store(pick);
+    return env->NewStringUTF(pick < 0 ? "rest pose" : g.actorClipNotes[size_t(pick)].c_str());
 }
 
 // Moves the camera target over the ground: (dx, dy) in screen fractions, right and up positive. The step

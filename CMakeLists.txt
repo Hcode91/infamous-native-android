@@ -15,6 +15,9 @@ add_library(ina_core STATIC
     engine/assets/vertex_layout.cpp
     engine/assets/collision.cpp
     engine/assets/character_mesh.cpp
+    engine/anim/clip.cpp
+    engine/anim/leg_ik.cpp
+    engine/anim/character_model.cpp
     engine/world/scene.cpp
     engine/world/city_stream.cpp
     engine/core/png.cpp)

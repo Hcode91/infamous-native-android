@@ -39,15 +39,22 @@ another joint follows for that vertex. One control byte covers four vertices:
 | 0A | read rows of four per-vertex entries, each with a row of four weights, until no vertex continues |
 | 08 | end |
 
-**Verified** on all 292 skinned records of four packs (cop, reaper, trash golem, `core.xpp`): every
-stream is consumed exactly, every vertex's weights sum to 255, and every palette index is in range. Each
-vertex's heaviest joint is the one beside it (hands: median 2.9 cm from the joint), apart from a handful
-of vertices (2 of 669 in the cop's hands) that land on the opposite side, which points at a detail of
-the 0A case not yet understood.
+Per-vertex entries (cases 02 and 0A) are stored with each pair of vertices swapped: second, first, fourth,
+third. The weights are in vertex order.
 
-**Posing (verified).** World matrices built from the rest pose through the parent links, times the inverse
-bind matrices, with the weights above, give an intact figure: the cop keeps its shape with slightly
-different proportions and its mouth open. A few vertices at the trouser hems and neck stick out.
+**Verified** on all 292 skinned records of four packs (cop, reaper, trash golem, `core.xpp`): every
+stream is consumed exactly, every vertex's weights sum to 255, and every palette index is in range. The
+pair swap was found by measuring how far vertices sit from their joints under every ordering (the swapped
+order is clearly closest for both cases, and unswapped is closest for the uniform case 06); it also puts
+each zero weight on the repeated filler entry. Before it, a few vertices per mesh were bound to the
+opposite side of the body and flew off in animated poses.
+
+**Posing (verified).** World matrices built from a pose through the parent links, times the inverse bind
+matrices, with the weights above, give an intact figure in the rest pose and in animated poses (see
+[animation.md](animation.md)).
+
+Not handled: props that are not skinned (the cop's pistol stays at the model origin instead of in his
+hand), and the helper joints that should bulge muscles and fix elbows and knees.
 
 ## Mesh entries and positions (solved)
 

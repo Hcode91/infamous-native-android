@@ -41,6 +41,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var modeButton: Button
     private lateinit var cityButton: Button
     private lateinit var personButton: Button
+    private lateinit var moveButton: Button
     private var personNote = ""
     private var lastX = 0f
     private var lastY = 0f
@@ -129,6 +130,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 cityButton.text = "City"
                 cityButton.visibility = if (worldMode) View.VISIBLE else View.GONE
                 personButton.visibility = if (worldMode) View.VISIBLE else View.GONE
+                moveButton.visibility = if (worldMode) View.VISIBLE else View.GONE
                 personNote = ""
                 text = if (worldMode) "Textures" else "World"
                 if (worldMode) showWorld(0) else { Native.hideWorld(); step(0, 0) }
@@ -160,6 +162,17 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             }
         }
         controls.addView(personButton)
+        // Steps through the animation clips of the character's pack.
+        moveButton = Button(this).apply {
+            text = "Move"
+            visibility = View.GONE
+            setOnClickListener {
+                if (!opened || !worldMode) return@setOnClickListener
+                val text = Native.clip(1)
+                personNote = personNote.substringBeforeLast("\n", personNote) + "\n" + text
+            }
+        }
+        controls.addView(moveButton)
         controls.visibility = View.GONE
         root.addView(controls, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
 

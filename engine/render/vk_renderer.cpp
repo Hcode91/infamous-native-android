@@ -688,6 +688,7 @@ uint32_t VkRenderer::addChunk(const std::vector<float>& vertices, const std::vec
         return 0;
     }
     ch.indexCount = uint32_t(indices.size());
+    ch.vertexBytes = vertices.size() * sizeof(float);
     ch.batches = batches;
     for (int k = 0; k < 3; k++) {
         ch.boxMin[k] = boxMin[k];
@@ -701,6 +702,17 @@ uint32_t VkRenderer::addChunk(const std::vector<float>& vertices, const std::vec
     const uint32_t id = nextChunk_++;
     chunks_[id] = std::move(ch);
     return id;
+}
+
+bool VkRenderer::updateChunkVertices(uint32_t id, const std::vector<float>& vertices) {
+    auto it = chunks_.find(id);
+    if (it == chunks_.end() || vertices.size() * sizeof(float) != it->second.vertexBytes) return false;
+    waitIdleFrame();   // the last frame may still be reading the buffer
+    void* p = nullptr;
+    if (vkMapMemory(dev_, it->second.vmem, 0, it->second.vertexBytes, 0, &p) != VK_SUCCESS) return false;
+    memcpy(p, vertices.data(), it->second.vertexBytes);
+    vkUnmapMemory(dev_, it->second.vmem);
+    return true;
 }
 
 void VkRenderer::removeChunk(uint32_t id) {

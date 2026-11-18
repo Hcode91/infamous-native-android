@@ -48,6 +48,9 @@ float halfToFloat(uint16_t h) {
 //   02  four per-vertex entries: each vertex rigid to its own joint
 //   0A  rows of four per-vertex entries, each with a row of weights, until no vertex has bit 2 set
 //   08  end
+// Per-vertex entries are stored with each pair of vertices swapped (second, first, fourth, third); weights are
+// in vertex order. Found from where vertices sit relative to their joints, and it removes the vertices that
+// used to fly off in animated poses.
 // Checked on 292 records of four packs: every stream is consumed exactly and all weights sum to 255.
 void appendSkin(const Pack& pack, size_t rec, uint32_t vertices, PackedMesh& m) {
     const auto data = pack.data();
@@ -85,7 +88,7 @@ void appendSkin(const Pack& pack, size_t rec, uint32_t vertices, PackedMesh& m) 
             for (auto& v : block) v.push_back({current, 1.0f});
         } else if (code == 2) {
             if (ip + 4 > nPer) return fail();
-            for (int v = 0; v < 4; v++) block[v].push_back({u16(data, per + (ip + uint32_t(v)) * 2), 1.0f});
+            for (int v = 0; v < 4; v++) block[v].push_back({u16(data, per + (ip + uint32_t(v ^ 1)) * 2), 1.0f});
             ip += 4;
         } else if (code == 6) {
             for (;;) {
@@ -101,7 +104,7 @@ void appendSkin(const Pack& pack, size_t rec, uint32_t vertices, PackedMesh& m) 
                 if (ip + 4 > nPer || iw + 4 > nWeights) return fail();
                 for (int v = 0; v < 4; v++) {
                     if (!alive[v]) continue;
-                    const uint32_t e = u16(data, per + (ip + uint32_t(v)) * 2);
+                    const uint32_t e = u16(data, per + (ip + uint32_t(v ^ 1)) * 2);
                     block[v].push_back({e, float(data[weights + iw + uint32_t(v)]) / 255.0f});
                     alive[v] = (e & 4) != 0;
                 }

@@ -1,4 +1,7 @@
 // Unit tests with synthetic data only: no game files are needed or used.
+#include "anim/character_model.h"
+#include "anim/clip.h"
+#include "anim/leg_ik.h"
 #include "assets/character_mesh.h"
 #include "assets/collision.h"
 #include "assets/hex_map.h"
@@ -571,6 +574,125 @@ int main() {
             CHECK(std::fabs(m.positions[3] - (10.0f + 4095.0f / 4096.0f)) < 1e-4f && m.positions[4] == -1.0f);       // the corners
             CHECK(m.positions[6] == 9.0f && m.positions[8] == 100.5f);
         }
+    }
+
+    // Animation clip: a made-up block with one constant vector, one constant rotation, one key-framed
+    // vector and one key-framed rotation over two frames.
+    {
+        std::vector<uint8_t> b(0x200, 0);
+        auto p16 = [&](size_t o, uint16_t v) { b[o] = uint8_t(v >> 8); b[o + 1] = uint8_t(v); };
+        auto p32 = [&](size_t o, uint32_t v) { p16(o, uint16_t(v >> 16)); p16(o + 2, uint16_t(v)); };
+        auto p64 = [&](size_t o, uint64_t v) { p32(o, uint32_t(v >> 32)); p32(o + 4, uint32_t(v)); };
+        p16(0, 0x4344); p16(2, 0x0107); p16(4, 4); p16(6, 0);   // four joints
+        p32(8, 0x200); p16(0x0C, 2); p16(0x0E, 2);              // two frames
+        const float fps = 30.0f;
+        uint32_t fpsBits;
+        memcpy(&fpsBits, &fps, 4);
+        p32(0x1C, fpsBits);
+        p32(0x30, 0x50); p32(0x38, 0x1C0);                      // command group, key data
+        b[0x50] = 0xF0;                                         // all four joints driven
+        // commands at 0x60; data offsets are relative to 0x60
+        const uint16_t cmds[] = {0x0316, 1, 0x000C, 0x0060,              // one constant vector, list at 0xC0
+                                 0x0318, 1, 0x000C, 0x0070,              // one constant rotation, list at 0xD0
+                                 0x060B, 0x8003, 0x000C, 0x0080, 0, 0, 2, // three channels (vector, padding, rotation), 2 bytes a frame
+                                 0x041B, 0x8003, 0x000C, 0x0090, 0,      // scale and offset rows at 0xF0
+                                 0x041E, 1, 0x000C, 0x00E0, 0x0040,      // rotation rows at 0x140; rotations start at channel 2
+                                 0x040F, 1, 0x000C, 0x00F0, 0,           // vector destinations at 0x150
+                                 0x0410, 1, 0x000C, 0x0100, 0x0040, 0};  // rotation destinations at 0x160
+        for (size_t i = 0; i < sizeof cmds / 2; i++) p16(0x60 + i * 2, cmds[i]);
+        // constant vector: joint 1 translation = (1, 2, -4) as half floats
+        p16(0xC0, 1 * 48 + 32); p16(0xC2, 0x3C00); p16(0xC4, 0x4000); p16(0xC6, 0xC400);
+        // constant rotation: joint 1, identity (three zero components, the fourth left out)
+        p16(0xD0, 1 * 48 + 16); p16(0xD2, 0x8000); p32(0xD4, 0x80010003);
+        // bits per channel
+        b[0xE0] = 5; b[0xE1] = 0; b[0xE2] = 4;
+        // rows: scale then offset, three packed floats each
+        auto uf = [](int exp, int shift) { return uint64_t(exp + 127) << shift; };   // 2^exp, no mantissa
+        p64(0xF0, uf(-1, 14) << 42 | uf(0, 13) << 21 | uf(0, 13));                    // vector scale (0.5, 1, 1)
+        p64(0xF8, (uint64_t(1) << 21 | uf(1, 13)) << 42);                             // offset (-2, 0, 0)
+        p64(0x110, uf(0, 14) << 42 | uf(0, 13) << 21 | uf(-3, 13));                   // rotation scale (1, 1, 0.125)
+        // widths: x, y, x + y, z
+        b[0x120] = 3; b[0x121] = 1; b[0x122] = 4; b[0x123] = 1;
+        b[0x128] = 1; b[0x129] = 1; b[0x12A] = 2; b[0x12B] = 2;
+        // rotation row: two quaternions interleaved; a = identity, b = half a turn about z
+        p16(0x140 + 12, 0x7FFF); p16(0x140 + 10, 0x7FFF);
+        p16(0x150, 2 * 48 + 32);                                // vector channel: joint 2 translation
+        p16(0x160, 3 * 48 + 16);                                // rotation channel: joint 3
+        // keys, 2 bytes a frame: vector x(3) y(1) z(1), then rotation x(1) y(1) z(2)
+        b[0x1C0] = 0b10110'000; b[0x1C1] = 0b0'0000000;         // frame 0: vector (5, 1, 0), rotation (0, 0, 0)
+        b[0x1C2] = 0b11101'000; b[0x1C3] = 0b0'0000000;         // frame 1: vector (7, 0, 1), rotation (0, 0, 0)
+        b[0x1C2] |= 0b001;                                      // rotation z = 2 -> 0.25 (the two bits straddle the bytes)
+        const AnimClip c = parseAnimClip(b);
+        CHECK(c.joints == 4 && c.frames == 2 && c.constants.size() == 2 && c.channels.size() == 2 && c.frameBytes == 2);
+        CHECK(c.validJoints.size() == 4 && c.validJoints[3]);
+        std::vector<float> pose(4 * 12, 0.0f);
+        for (int j = 0; j < 4; j++) pose[size_t(j) * 12 + 7] = 1;
+        c.evaluate(0.0f, pose);
+        CHECK(pose[12 + 8] == 1.0f && pose[12 + 9] == 2.0f && pose[12 + 10] == -4.0f);       // the constant vector
+        CHECK(std::fabs(pose[12 + 7] - 1.0f) < 1e-4f && std::fabs(pose[12 + 4]) < 1e-4f);     // the constant rotation
+        CHECK(std::fabs(pose[24 + 8] - 0.5f) < 1e-5f && pose[24 + 9] == 1.0f && pose[24 + 10] == 0.0f);   // -2 + 0.5 * 5
+        // frame 0 of the rotation is the product of the two stored quaternions: half a turn about z
+        CHECK(std::fabs(pose[36 + 6] - 1.0f) < 1e-3f && std::fabs(pose[36 + 7]) < 1e-3f);
+        c.evaluate(1.0f, pose);
+        CHECK(std::fabs(pose[24 + 8] - 1.5f) < 1e-5f && pose[24 + 9] == 0.0f && pose[24 + 10] == 1.0f);
+        // exp of (0, 0, 0.25): a further turn of 0.5 radians about z
+        CHECK(std::fabs(pose[36 + 6] - std::cos(0.25f)) < 1e-3f && std::fabs(std::fabs(pose[36 + 7]) - std::sin(0.25f)) < 1e-3f);
+        c.evaluate(0.5f, pose);
+        CHECK(std::fabs(pose[24 + 8] - 1.0f) < 1e-5f);                                         // half way between the frames
+        std::vector<uint8_t> bad = b;
+        bad[0x60 + 1] = 0x77;                                    // an unknown command
+        bool threw = false;
+        try { parseAnimClip(bad); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+    }
+    // Leg solve and skinning on a made-up skeleton: root, hip, knee, ankle, foot target, helper.
+    {
+        Skeleton s;
+        s.jointCount = 6;
+        s.parents = {-1, 0, 1, 2, 0, 4};
+        s.nameOids = {0, 1, 2, 3, 4, 5};
+        const std::vector<std::string> names = {"root", "hip_left", "knee_left", "ankle_left", "left_foot_foster", "left_leg_ik"};
+        const float t[6][3] = {{0, 0, 100}, {0, 0, 0}, {5, 0, -50}, {-5, 0, -50}, {10, 0, -100}, {0, 0, 0}};
+        for (int j = 0; j < 6; j++) {
+            const float e[12] = {1, 1, 1, 0, 0, 0, 0, 1, t[j][0], t[j][1], t[j][2], 0};
+            s.restPose.insert(s.restPose.end(), e, e + 12);
+        }
+        const auto rest = poseToWorld(s, s.restPose);
+        for (int j = 0; j < 6; j++) {   // inverse bind: undo the rest position
+            const float m[12] = {1, 0, 0, -rest[size_t(j) * 12 + 3], 0, 1, 0, -rest[size_t(j) * 12 + 7], 0, 0, 1, -rest[size_t(j) * 12 + 11]};
+            s.inverseBind.insert(s.inverseBind.end(), m, m + 12);
+        }
+        const auto legs = findLegChains(s, names);
+        CHECK(legs.size() == 1 && legs[0].hip == 1 && legs[0].ankle == 3 && legs[0].target == 4);
+        // unchanged pose: the solve leaves every joint where it was
+        auto same = poseToWorldWithLegs(s, s.restPose, rest, legs);
+        float worst = 0;
+        for (size_t i = 0; i < same.size(); i++) worst = std::max(worst, std::fabs(same[i] - rest[i]));
+        CHECK(worst < 1e-3f);
+        // lift the foot target by 30 and move it forward by 20: the ankle follows, the bones keep their lengths
+        std::vector<float> pose = s.restPose;
+        pose[4 * 12 + 8] += 20; pose[4 * 12 + 10] += 30;
+        const auto w = poseToWorldWithLegs(s, pose, rest, legs);
+        auto at = [&](int j, int k) { return w[size_t(j) * 12 + size_t(3 + k * 4)]; };
+        CHECK(std::fabs(at(3, 0) - (rest[3 * 12 + 3] + 20)) < 1e-2f && std::fabs(at(3, 2) - (rest[3 * 12 + 11] + 30)) < 1e-2f);
+        const float thigh = std::sqrt((at(2, 0) - at(1, 0)) * (at(2, 0) - at(1, 0)) + (at(2, 2) - at(1, 2)) * (at(2, 2) - at(1, 2)) + at(2, 1) * at(2, 1));
+        CHECK(std::fabs(thigh - std::sqrt(5.0f * 5 + 50 * 50)) < 1e-2f);
+        CHECK(at(2, 0) > at(1, 0));   // the knee still bends forward
+        // a one-triangle mesh rigid to the ankle moves with it
+        CharacterModel::Part part;
+        part.mesh.positions = {-5, 0, 0, -4, 0, 0, -5, 1, 0};   // around the ankle's rest position (0, 0, 0)
+        part.mesh.uvs = {0, 0, 1, 0, 0, 1};
+        part.mesh.indices = {0, 1, 2};
+        part.mesh.joints = {3, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0};
+        part.mesh.weights = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
+        std::vector<CharacterModel::Part> parts;
+        parts.push_back(part);
+        const float off[3] = {1000, 0, 0};
+        const CharacterModel model(std::move(parts), s, off);
+        CHECK(model.triangles() == 1 && model.scene().vertices.size() == 24 && model.scene().batches.size() == 1);
+        std::vector<float> v = model.scene().vertices;
+        model.skin(w, v);
+        CHECK(std::fabs(v[0] - (1000 - 5 + 20)) < 1e-2f && std::fabs(v[2] - 30) < 1e-2f && std::fabs(v[8] - (1000 - 4 + 20)) < 1e-2f);
     }
     (void)bef;
     printf(failures ? "%d FAILED\n" : "all tests passed\n", failures);

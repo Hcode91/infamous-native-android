@@ -1,6 +1,6 @@
 # Progress report
 
-Last updated: 2026-11-15 (evening). Tested against the EU disc release (BCES00220).
+Last updated: 2026-11-18. Tested against the EU disc release (BCES00220).
 
 ## Verified
 
@@ -28,12 +28,11 @@ Last updated: 2026-11-15 (evening). Tested against the EU disc release (BCES0022
 
 | Area | State |
 |---|---|
-| Skinned model geometry | Bit-packed positions unpack into correct limb shapes, but the per-piece scale and offset are unknown |
 | Streaming | The city is streamed around the camera: the current sector at full detail, its neighbours at level 5, the far-away city elsewhere; geometry in culled chunks |
 | Collision | Sector collision polygons decoded; the camera follows the ground. See docs/formats/collision.md |
-| Characters, bind pose | Mesh entries, model-space boxes and packed positions decoded: characters, creatures and vehicles assemble in their bind pose. Texture coordinates, materials and variants (which optional meshes each shows) and skinning tables (joints and weights per vertex) decoded; a character can be posed from joint transforms (checked with the rest pose). See docs/formats/characters.md |
+| Characters | Mesh entries, model-space boxes and packed positions decoded: characters, creatures and vehicles assemble in their bind pose. Texture coordinates, materials and variants (which optional meshes each shows) and skinning tables (joints and weights per vertex) decoded; characters are posed from joint transforms, at rest and animated. Variant material swaps and proportions, and unskinned props (the pistol), are not applied. See docs/formats/characters.md |
 | Scripts | Property sets decoded (typed values bound to named class properties); instruction streams found but not decoded. See docs/formats/scripts.md |
-| Animation | Clip blocks (`CD`) found: header, frame rate, frame count, driven-joint mask; key-frame compression not decoded. See docs/formats/animation.md |
+| Animation | Clip blocks (`CD`) decode to joint transforms: command lists, constant channels, bit-packed key frames, packed scale and offset, rotation channels. All 170 clips of the cop pack parse and their key data has exactly the predicted size; the cop aims with both hands on one point and runs. Legs are placed from the clips' foot targets with our own two-bone solve (the game's solver is not known). Open: two flag bits on some rotation components, float channels, blend trees and clip names, root movement. See docs/formats/animation.md |
 | Lights | Light position, rotation, ranges and cone angles located; colours not yet. See docs/formats/lights.md |
 
 ## Built but not yet run on a device
@@ -41,12 +40,12 @@ Last updated: 2026-11-15 (evening). Tested against the EU disc release (BCES0022
 | Area | State |
 |---|---|
 | World viewer, streaming | Sectors load and unload as the camera moves; two fingers move the camera, which stays on the ground |
-| World viewer, characters | A Person button stands a character variant at the camera target, textured, in its bind pose |
+| World viewer, animation | The Person button's character plays a clip from its pack, skinned on the CPU every frame; a Move button steps through the pack's clips |
 | World viewer, whole city | Draws the far-away city on its own |
 
 ## Not started
 
-Shaders (beyond their vertex layouts), animation, collision and navigation, lights, particles, streaming,
+Shaders (beyond their vertex layouts), animation blending and state machines, navigation, lights, particles, streaming,
 the script instruction set and mission logic, physics, AI, audio, text, input, save data, touch controls,
 graphics presets. docs/formats/object-classes.md lists where each lives.
 
@@ -68,7 +67,7 @@ None yet. No figure will be reported here until it has been measured on a device
 ## Next
 
 1. Run the streaming build on a device.
-2. The animation clip command set, so a character can play a clip.
-3. The animation command set, then a character playing a clip.
+2. Run the animated character on a device.
+3. Animation: which named node plays which clip, blending, root movement, the helper joints.
 4. The script instruction set (from the game executable's interpreter).
 5. Light colours, then lights in the renderer.

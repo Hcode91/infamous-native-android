@@ -4,6 +4,10 @@
 //   ina_tool textures <archive.psarc_s> <pack name> <out dir> [oid_manifest.txt]
 //   ina_tool meshes <archive.psarc_s> <pack name> [out.obj] [archive holding core.xpp] [oid_manifest.txt]   a sector, assembled
 //   ina_tool city <archive holding EMPIRE.xpp> [out.obj] [oid_manifest.txt]             the far-away city and its hex cells
+//   ina_tool clips <archive> <pack> [oid_manifest.txt] [clip] [frame] [out.obj]         animation clips; one clip posed
+#include "anim/character_model.h"
+#include "anim/clip.h"
+#include "anim/leg_ik.h"
 #include "assets/character_mesh.h"
 #include "assets/collision.h"
 #include "assets/hex_map.h"
@@ -298,6 +302,77 @@ int main(int argc, char** argv) {
                 const float x = float(atof(argv[5])), y = float(atof(argv[6]));
                 if (ground.heightAt(x, y, 1e9f, &z)) printf("highest surface at %.0f %.0f: %.1f\n", x, y, z);
                 else printf("no surface at %.0f %.0f\n", x, y);
+            }
+            return 0;
+        }
+        if (cmd == "clips" && argc >= 4) {
+            // ina_tool clips <archive> <pack> [oid_manifest.txt] [clip number] [frame] [out.obj]: the animation
+            // clips of a pack; with a clip number, where that clip puts each joint at a frame, and the pack's
+            // meshes in that pose as an OBJ
+            const int idx = arc.find(argv[3]);
+            if (idx < 0) {
+                fprintf(stderr, "no pack named %s\n", argv[3]);
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            const auto names = argc > 4 ? loadNames(argv[4]) : std::vector<std::string>();
+            size_t skipped = 0;
+            const auto clips = readAnimClips(p, &skipped);
+            printf("%zu clips, %zu not readable\n", clips.size(), skipped);
+            if (argc <= 5) {
+                for (size_t i = 0; i < clips.size(); i++) {
+                    size_t rot = 0, bits = 0;
+                    for (const auto& ch : clips[i].channels) {
+                        rot += ch.rotation;
+                        bits += ch.width[0] + ch.width[1] + ch.width[2];
+                    }
+                    printf("%3zu  at 0x%06x  %3u frames  %2.0f fps  %3zu constants  %2zu moving vectors  %2zu moving rotations  %3zu bits a frame\n", i,
+                           clips[i].offset, clips[i].frames, clips[i].fps, clips[i].constants.size(), clips[i].channels.size() - rot, rot, bits);
+                }
+                return 0;
+            }
+            const size_t pick = size_t(atoi(argv[5]));
+            if (pick >= clips.size()) {
+                fprintf(stderr, "no clip %zu\n", pick);
+                return 1;
+            }
+            const Skeleton skel = readSkeleton(p);
+            if (!skel.jointCount) {
+                fprintf(stderr, "the pack has no joint hierarchy\n");
+                return 1;
+            }
+            const float frame = argc > 6 ? float(atof(argv[6])) : 0.0f;
+            std::vector<float> pose = skel.restPose;
+            clips[pick].evaluate(frame, pose);
+            const auto restWorld = poseToWorld(skel, skel.restPose);
+            const auto legs = findLegChains(skel, names);
+            const auto world = poseToWorldWithLegs(skel, pose, restWorld, legs);
+            printf("clip %zu frame %.2f, %zu leg chains\n", pick, frame, legs.size());
+            for (uint32_t j = 0; j < skel.jointCount; j++) {
+                const std::string nm = skel.nameOids[j] < names.size() ? names[skel.nameOids[j]] : "joint " + std::to_string(j);
+                printf("%3u %-28s %8.2f %8.2f %8.2f\n", j, nm.c_str(), world[j * 12 + 3], world[j * 12 + 7], world[j * 12 + 11]);
+            }
+            if (argc > 7) {
+                std::vector<CharacterModel::Part> parts;
+                const auto variants = readCharacterVariants(p);
+                for (PackedMesh& m : readPackedMeshes(p)) {
+                    if (variants.empty() ? m.optional : !variantShows(variants[0], m)) continue;
+                    CharacterModel::Part part;
+                    part.mesh = std::move(m);
+                    parts.push_back(std::move(part));
+                }
+                const float zero[3] = {0, 0, 0};
+                const CharacterModel model(std::move(parts), skel, zero);
+                std::vector<float> v = model.scene().vertices;
+                model.skin(world, v);
+                FILE* obj = fopen(argv[7], "w");
+                if (!obj) return 1;
+                for (size_t i = 0; i + 7 < v.size(); i += 8) fprintf(obj, "v %.3f %.3f %.3f\n", v[i], v[i + 1], v[i + 2]);
+                const auto& ix = model.scene().indices;
+                for (size_t i = 0; i + 2 < ix.size(); i += 3) fprintf(obj, "f %u %u %u\n", ix[i] + 1, ix[i + 1] + 1, ix[i + 2] + 1);
+                fclose(obj);
+                printf("wrote %s: %zu triangles\n", argv[7], model.triangles());
             }
             return 0;
         }

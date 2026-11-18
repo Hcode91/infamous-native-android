@@ -44,6 +44,8 @@ public:
     bool addTexture(uint64_t key, const SceneTexture& texture);   // a texture no chunk uses yet
     uint32_t addChunk(const std::vector<float>& vertices, const std::vector<uint32_t>& indices, const std::vector<ChunkBatch>& batches,
                       const float boxMin[3], const float boxMax[3]);   // returns the chunk id, 0 on failure
+    // Replaces a chunk's vertex data in place (same vertex count as when it was added); for animated meshes.
+    bool updateChunkVertices(uint32_t id, const std::vector<float>& vertices);
     void removeChunk(uint32_t id);
     void setChunkVisible(uint32_t id, bool visible);
     void clearChunks();
@@ -113,6 +115,7 @@ private:
         VkBuffer vbuf = VK_NULL_HANDLE, ibuf = VK_NULL_HANDLE;
         VkDeviceMemory vmem = VK_NULL_HANDLE, imem = VK_NULL_HANDLE;
         uint32_t indexCount = 0;
+        size_t vertexBytes = 0;
         std::vector<ChunkBatch> batches;
         float boxMin[3] = {0, 0, 0}, boxMax[3] = {0, 0, 0};
         bool visible = true;
