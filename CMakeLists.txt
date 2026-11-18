@@ -14,6 +14,7 @@ add_library(ina_core STATIC
     engine/assets/hex_map.cpp
     engine/assets/vertex_layout.cpp
     engine/assets/collision.cpp
+    engine/assets/character_mesh.cpp
     engine/world/scene.cpp
     engine/world/city_stream.cpp
     engine/core/png.cpp)

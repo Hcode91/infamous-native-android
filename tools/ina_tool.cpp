@@ -4,6 +4,7 @@
 //   ina_tool textures <archive.psarc_s> <pack name> <out dir> [oid_manifest.txt]
 //   ina_tool meshes <archive.psarc_s> <pack name> [out.obj] [archive holding core.xpp] [oid_manifest.txt]   a sector, assembled
 //   ina_tool city <archive holding EMPIRE.xpp> [out.obj] [oid_manifest.txt]             the far-away city and its hex cells
+#include "assets/character_mesh.h"
 #include "assets/collision.h"
 #include "assets/hex_map.h"
 #include "assets/pack.h"
@@ -298,6 +299,36 @@ int main(int argc, char** argv) {
                 if (ground.heightAt(x, y, 1e9f, &z)) printf("highest surface at %.0f %.0f: %.1f\n", x, y, z);
                 else printf("no surface at %.0f %.0f\n", x, y);
             }
+            return 0;
+        }
+        if (cmd == "character" && argc >= 4) {
+            // ina_tool character <archive> <pack> [out.obj] [oid_manifest.txt]: the packed meshes of a pack
+            // in the bind pose (every variant's meshes together)
+            const int idx = arc.find(argv[3]);
+            if (idx < 0) {
+                fprintf(stderr, "no pack named %s\n", argv[3]);
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            const auto names = argc > 5 ? loadNames(argv[5]) : std::vector<std::string>();
+            size_t skipped = 0, base = 1, tris = 0;
+            const auto meshes = readPackedMeshes(p, &skipped);
+            FILE* obj = argc > 4 ? fopen(argv[4], "w") : nullptr;
+            for (const PackedMesh& m : meshes) {
+                printf("%-24s %u record(s), %zu vertices, %zu triangles, box %.1f %.1f %.1f .. %.1f %.1f %.1f\n",
+                       m.nameOid < names.size() ? names[m.nameOid].c_str() : std::to_string(m.nameOid).c_str(), m.records,
+                       m.positions.size() / 3, m.indices.size() / 3, m.boxMin[0], m.boxMin[1], m.boxMin[2], m.boxMax[0], m.boxMax[1], m.boxMax[2]);
+                tris += m.indices.size() / 3;
+                if (obj) {
+                    for (size_t v = 0; v + 2 < m.positions.size(); v += 3) fprintf(obj, "v %g %g %g\n", m.positions[v], m.positions[v + 1], m.positions[v + 2]);
+                    for (size_t t = 0; t + 2 < m.indices.size(); t += 3)
+                        fprintf(obj, "f %zu %zu %zu\n", base + m.indices[t], base + m.indices[t + 1], base + m.indices[t + 2]);
+                    base += m.positions.size() / 3;
+                }
+            }
+            if (obj) fclose(obj);
+            printf("%zu meshes, %zu triangles, %zu entries not decoded\n", meshes.size(), tris, skipped);
             return 0;
         }
         fprintf(stderr, "unknown command\n");

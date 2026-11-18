@@ -31,7 +31,7 @@ Last updated: 2026-11-15 (evening). Tested against the EU disc release (BCES0022
 | Skinned model geometry | Bit-packed positions unpack into correct limb shapes, but the per-piece scale and offset are unknown |
 | Streaming | The city is streamed around the camera: the current sector at full detail, its neighbours at level 5, the far-away city elsewhere; geometry in culled chunks |
 | Collision | Sector collision polygons decoded; the camera follows the ground. See docs/formats/collision.md |
-| Characters | Joint hierarchy (211 joints, bind matrices, pose) and per-piece joint palettes found; a figure assembles in a T pose but with wrong proportions. See docs/formats/characters.md |
+| Characters, bind pose | Mesh entries, model-space boxes and packed positions decoded: characters, creatures and vehicles assemble in their bind pose. Skinning tables and texture coordinates not decoded yet. See docs/formats/characters.md |
 | Scripts | Property sets decoded (typed values bound to named class properties); instruction streams found but not decoded. See docs/formats/scripts.md |
 | Animation | Clip blocks (`CD`) found: header, frame rate, frame count, driven-joint mask; key-frame compression not decoded. See docs/formats/animation.md |
 | Lights | Light position, rotation, ranges and cone angles located; colours not yet. See docs/formats/lights.md |
@@ -67,7 +67,7 @@ None yet. No figure will be reported here until it has been measured on a device
 ## Next
 
 1. Run the streaming build on a device.
-2. Characters: a recording of the game's character job (from the port) to settle the space packed positions are stored in.
+2. Characters: texture coordinates and materials, then a character drawn in the world view.
 3. The animation command set, then a character playing a clip.
 4. The script instruction set (from the game executable's interpreter).
 5. Light colours, then lights in the renderer.

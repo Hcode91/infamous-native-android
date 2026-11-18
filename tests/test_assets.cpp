@@ -1,4 +1,5 @@
 // Unit tests with synthetic data only: no game files are needed or used.
+#include "assets/character_mesh.h"
 #include "assets/collision.h"
 #include "assets/hex_map.h"
 #include "assets/pack.h"
@@ -526,6 +527,50 @@ int main() {
         CHECK(g.heightAt(1010, 10, 400, &z) && std::fabs(z - 10) < 0.01f);    // below the roof: the ramp
         CHECK(!g.heightAt(50, 50, 1000, &z));                                 // outside
         CHECK(g.triangleCount() == 3);
+    }
+    // Packed mesh: one entry with a box centred on (10, 0, 100) and one record of three vertices packed
+    // 13, 13, 13 bits with scale 512 and bias -512 (so q = 4096 is the centre and 1 unit = 1/4096 * 1).
+    {
+        auto put = [](std::vector<uint8_t>& r, size_t o, uint32_t v) { r[o] = uint8_t(v >> 24); r[o + 1] = uint8_t(v >> 16); r[o + 2] = uint8_t(v >> 8); r[o + 3] = uint8_t(v); };
+        auto putf = [&](std::vector<uint8_t>& r, size_t o, float f) { uint32_t u; memcpy(&u, &f, 4); put(r, o, u); };
+        std::vector<uint8_t> r0(0x400, 0);
+        const uint32_t ent = 0x40, list = 0x100, rec = 0x140, vb = 0x300, ib = 0x340;
+        const float box[6] = {9, -1, 99, 11, 1, 101};
+        for (int i = 0; i < 6; i++) putf(r0, ent + 0x40 + size_t(i) * 4, box[i]);
+        put(r0, ent + 0x30, 42); put(r0, ent + 0x64, list); put(r0, ent + 0x68, 1);
+        put(r0, list, rec);
+        for (int k = 0; k < 4; k++) { put(r0, rec + size_t(k) * 8, vb); put(r0, rec + size_t(k) * 8 + 4, vb); }
+        r0[rec + 0x21] = 1; r0[rec + 0x25] = 6; put(r0, rec + 0x28, ib);
+        const size_t attr = rec + 0x70;
+        const uint8_t table[24] = {1, 0x43, 0, 0x20, 13, 13, 13, 0, 2, 0x43, 0, 0x38, 8, 8, 8, 0, 3, 0x43, 0, 0x50, 8, 8, 8, 0};
+        memcpy(r0.data() + attr, table, 24);
+        for (int c = 0; c < 3; c++) { putf(r0, attr + 24 + size_t(c) * 4, 512.0f); putf(r0, attr + 36 + size_t(c) * 4, -512.0f); }
+        // vertices q = (4096,4096,4096), (8191,0,4096), (0,4096,6144), MSB first
+        const uint32_t q[3][3] = {{4096, 4096, 4096}, {8191, 0, 4096}, {0, 4096, 6144}};
+        size_t bit = 0;
+        for (auto& v : q)
+            for (uint32_t x : v)
+                for (int b = 12; b >= 0; b--, bit++)
+                    if (x >> b & 1) r0[vb + bit / 8] |= uint8_t(0x80 >> (bit % 8));
+        r0[ib + 3] = 1; r0[ib + 5] = 2;
+        auto w = [](uint32_t off) { return uint16_t(off / 4); };
+        std::vector<uint16_t> codes = {0xC000, w(ent + 0x64), w(list)};
+        for (int k = 0; k < 8; k++) codes.push_back(w(rec + uint32_t(k) * 4));
+        codes.push_back(w(rec + 0x28));
+        std::vector<uint8_t> dir;
+        be32(dir, 0); be32(dir, 0);
+        const std::vector<uint8_t> file = makePackFromSegments({{1, 0x10, r0}, {6, 4, dir}, {2, 4, makeFixups(codes)}});
+        Pack p(file);
+        size_t skipped = 9;
+        const auto meshes = readPackedMeshes(p, &skipped);
+        CHECK(meshes.size() == 1 && skipped == 0);
+        if (meshes.size() == 1) {
+            const PackedMesh& m = meshes[0];
+            CHECK(m.nameOid == 42 && m.records == 1 && m.positions.size() == 9 && m.indices.size() == 3 && m.indices[2] == 2);
+            CHECK(m.positions[0] == 10.0f && m.positions[1] == 0.0f && m.positions[2] == 100.0f);                       // the centre
+            CHECK(std::fabs(m.positions[3] - (10.0f + 4095.0f / 4096.0f)) < 1e-4f && m.positions[4] == -1.0f);       // the corners
+            CHECK(m.positions[6] == 9.0f && m.positions[8] == 100.5f);
+        }
     }
     (void)bef;
     printf(failures ? "%d FAILED\n" : "all tests passed\n", failures);
