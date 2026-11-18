@@ -37,6 +37,98 @@ float halfToFloat(uint16_t h) {
     return f;
 }
 
+// Reads a record's skinning tables and appends four (joint, weight) pairs per vertex to `m`. Layout (all
+// offsets from the record): +0x30 u16 control bytes, u16 bytes of uniform matrix entries; +0x34 u16 bytes of
+// per-vertex matrix entries, u16 weight bytes; +0x38 u16 palette runs; pointers at +0x3C (control bytes),
+// +0x40 (uniform entries), +0x44 (per-vertex entries), +0x48 (weights), +0x50 (runs of u16 first joint,
+// u16 count). A matrix entry is the palette index times 0x30, with bit 2 set when another joint follows.
+// One control byte covers four vertices:
+//   04  one new uniform entry: all four rigid to that joint        00  the same joint again
+//   06  uniform entries until one without bit 2; a row of four weights (bytes) per joint
+//   02  four per-vertex entries: each vertex rigid to its own joint
+//   0A  rows of four per-vertex entries, each with a row of weights, until no vertex has bit 2 set
+//   08  end
+// Checked on 292 records of four packs: every stream is consumed exactly and all weights sum to 255.
+void appendSkin(const Pack& pack, size_t rec, uint32_t vertices, PackedMesh& m) {
+    const auto data = pack.data();
+    const size_t before = m.joints.size();
+    auto fail = [&] {
+        m.joints.resize(before);
+        m.weights.resize(before);
+        m.joints.resize(before + size_t(vertices) * 4, 0);
+        m.weights.resize(before + size_t(vertices) * 4, 0.0f);
+        for (size_t v = 0; v < vertices; v++) m.weights[before + v * 4] = 1.0f;
+    };
+    if (!pack.isPointer(rec + 0x3C) || !pack.isPointer(rec + 0x50)) return fail();
+    const uint32_t nControl = u16(data, rec + 0x30), nUniform = u16(data, rec + 0x32) / 2u, nPer = u16(data, rec + 0x34) / 2u;
+    const uint32_t nWeights = u16(data, rec + 0x36), nRuns = u16(data, rec + 0x38);
+    const uint32_t control = pack.word(rec + 0x3C), uniform = pack.word(rec + 0x40), per = pack.word(rec + 0x44);
+    const uint32_t weights = pack.word(rec + 0x48), runs = pack.word(rec + 0x50);
+    auto inside = [&](uint32_t at, size_t bytes) { return at <= data.size() && bytes <= data.size() - at; };
+    if (!inside(control, nControl) || !inside(uniform, nUniform * 2) || !inside(per, nPer * 2) || !inside(weights, nWeights) ||
+        !inside(runs, nRuns * 4))
+        return fail();
+    std::vector<uint16_t> palette;
+    for (uint32_t k = 0; k < nRuns; k++)
+        for (uint32_t j = 0; j < u16(data, runs + k * 4 + 2); j++) palette.push_back(uint16_t(u16(data, runs + k * 4) + j));
+    uint32_t iu = 0, ip = 0, iw = 0, done = 0, current = 0;
+    struct Influence { uint32_t entry; float weight; };
+    for (uint32_t b = 0; b < nControl && done < vertices; b++) {
+        const uint8_t code = data[control + b];
+        std::vector<Influence> block[4];
+        if (code == 8) break;
+        if (code == 4 || code == 0) {
+            if (code == 4) {
+                if (iu >= nUniform) return fail();
+                current = u16(data, uniform + iu++ * 2);
+            }
+            for (auto& v : block) v.push_back({current, 1.0f});
+        } else if (code == 2) {
+            if (ip + 4 > nPer) return fail();
+            for (int v = 0; v < 4; v++) block[v].push_back({u16(data, per + (ip + uint32_t(v)) * 2), 1.0f});
+            ip += 4;
+        } else if (code == 6) {
+            for (;;) {
+                if (iu >= nUniform || iw + 4 > nWeights) return fail();
+                const uint32_t e = u16(data, uniform + iu++ * 2);
+                for (int v = 0; v < 4; v++) block[v].push_back({e, float(data[weights + iw + uint32_t(v)]) / 255.0f});
+                iw += 4;
+                if (!(e & 4)) break;
+            }
+        } else if (code == 10) {
+            bool alive[4] = {true, true, true, true};
+            while (alive[0] || alive[1] || alive[2] || alive[3]) {
+                if (ip + 4 > nPer || iw + 4 > nWeights) return fail();
+                for (int v = 0; v < 4; v++) {
+                    if (!alive[v]) continue;
+                    const uint32_t e = u16(data, per + (ip + uint32_t(v)) * 2);
+                    block[v].push_back({e, float(data[weights + iw + uint32_t(v)]) / 255.0f});
+                    alive[v] = (e & 4) != 0;
+                }
+                ip += 4;
+                iw += 4;
+            }
+        } else {
+            return fail();
+        }
+        for (int v = 0; v < 4 && done < vertices; v++, done++) {
+            // keep the four heaviest joints and make their weights sum to 1
+            auto& inf = block[v];
+            std::sort(inf.begin(), inf.end(), [](const Influence& x, const Influence& y) { return x.weight > y.weight; });
+            inf.resize(4, Influence{0, 0.0f});
+            float sum = 0;
+            for (const Influence& i : inf) sum += i.weight;
+            for (const Influence& i : inf) {
+                const uint32_t index = i.entry / 0x30;
+                if (index >= palette.size()) return fail();
+                m.joints.push_back(i.weight > 0 ? palette[index] : palette[inf[0].entry / 0x30]);
+                m.weights.push_back(sum > 0 ? i.weight / sum : 0.0f);
+            }
+        }
+    }
+    if (done < vertices) return fail();
+}
+
 // Appends one packed record to `m`. Record layout: four stream pointers (each stored twice), u16 triangle
 // count at +0x20, u16 index bytes at +0x24, index pointer at +0x28, and further on an attribute table:
 // three 8-byte entries (id, flags, u16 offset of the attribute's constants, three bit widths), the first
@@ -99,6 +191,7 @@ bool appendRecord(const Pack& pack, size_t rec, const float centre[3], PackedMes
         m.uvs.push_back(uv[0]);
         m.uvs.push_back(uv[1]);
     }
+    appendSkin(pack, rec, vertices, m);
     for (uint32_t i : idx) m.indices.push_back(base + i);
     m.records++;
     return true;
@@ -182,6 +275,24 @@ std::vector<CharacterVariant> readCharacterVariants(const Pack& pack, uint32_t v
         out.push_back(std::move(v));
     }
     return out;
+}
+
+// Joint hierarchy block: magic "JH", u16 version 0x010A, ..., u16 joint count at +0x0C; offsets from the
+// block at +0x38 (names, as object ids; the first three are not joints) and +0x44 (inverse bind matrices).
+Skeleton readSkeleton(const Pack& pack) {
+    Skeleton s;
+    const auto data = pack.data();
+    for (size_t at = 0; at + 0x50 <= data.size(); at += 16) {
+        if (data[at] != 'J' || data[at + 1] != 'H' || data[at + 2] != 1 || data[at + 3] != 0x0A) continue;
+        const uint32_t n = u16(data, at + 0x0C), names = pack.word(at + 0x38), binds = pack.word(at + 0x44);
+        if (n == 0 || n > 1024 || at + binds + size_t(n) * 48 > data.size() || at + names + (size_t(n) + 3) * 4 > data.size()) continue;
+        s.offset = uint32_t(at);
+        s.jointCount = n;
+        for (uint32_t i = 0; i < n * 12; i++) s.inverseBind.push_back(f32(pack, at + binds + size_t(i) * 4));
+        for (uint32_t i = 0; i < n; i++) s.nameOids.push_back(pack.word(at + names + (size_t(i) + 3) * 4));
+        break;
+    }
+    return s;
 }
 
 bool variantShows(const CharacterVariant& variant, const PackedMesh& mesh) {

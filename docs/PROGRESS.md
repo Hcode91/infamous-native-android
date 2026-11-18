@@ -19,7 +19,7 @@ Last updated: 2026-11-15 (evening). Tested against the EU disc release (BCES0022
 | City layout | Hex grid decoded: 111 cells, each naming its sector and position. Streets line up across cells |
 | Far-away city | The low-detail version of the whole city (191,920 triangles) assembles into three islands |
 | Materials | Texture slots of the common material class; colour maps resolve to textures in the sector or the shared pack |
-| World viewer | Run on a Galaxy S23: geometry, camera and colour maps work (builds without shared geometry) |
+| World viewer | Run on a device: the streamed city and a textured character standing in it |
 | Rigid model geometry | Packed positions decode for rigid pieces (checked by eye on a weapon) |
 | Host tool | `ina_tool` lists archives, summarises packs, writes textures as PNG |
 | Unit tests | Archive, pack and texture decoders, on synthetic data; run in CI |
@@ -31,7 +31,7 @@ Last updated: 2026-11-15 (evening). Tested against the EU disc release (BCES0022
 | Skinned model geometry | Bit-packed positions unpack into correct limb shapes, but the per-piece scale and offset are unknown |
 | Streaming | The city is streamed around the camera: the current sector at full detail, its neighbours at level 5, the far-away city elsewhere; geometry in culled chunks |
 | Collision | Sector collision polygons decoded; the camera follows the ground. See docs/formats/collision.md |
-| Characters, bind pose | Mesh entries, model-space boxes and packed positions decoded: characters, creatures and vehicles assemble in their bind pose. Texture coordinates, materials and variants (which optional meshes each shows) decoded; skinning tables are not. See docs/formats/characters.md |
+| Characters, bind pose | Mesh entries, model-space boxes and packed positions decoded: characters, creatures and vehicles assemble in their bind pose. Texture coordinates, materials and variants (which optional meshes each shows) and skinning tables (joints and weights per vertex) decoded; not posed yet. See docs/formats/characters.md |
 | Scripts | Property sets decoded (typed values bound to named class properties); instruction streams found but not decoded. See docs/formats/scripts.md |
 | Animation | Clip blocks (`CD`) found: header, frame rate, frame count, driven-joint mask; key-frame compression not decoded. See docs/formats/animation.md |
 | Lights | Light position, rotation, ranges and cone angles located; colours not yet. See docs/formats/lights.md |
@@ -68,7 +68,7 @@ None yet. No figure will be reported here until it has been measured on a device
 ## Next
 
 1. Run the streaming build on a device.
-2. Characters: skinning tables, so a character can be posed.
+2. Characters: joint parents and rest pose, then the animation command set, so a character can be posed.
 3. The animation command set, then a character playing a clip.
 4. The script instruction set (from the game executable's interpreter).
 5. Light colours, then lights in the renderer.

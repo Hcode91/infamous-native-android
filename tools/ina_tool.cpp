@@ -337,6 +337,16 @@ int main(int argc, char** argv) {
                 }
             }
             if (obj) fclose(obj);
+            const Skeleton skeleton = readSkeleton(p);
+            size_t skinned = 0, blended = 0, total = 0;
+            for (const PackedMesh& m : meshes)
+                for (size_t v = 0; v + 3 < m.weights.size(); v += 4) {
+                    total++;
+                    skinned += m.joints[v] != 0 || m.weights[v] < 1.0f;
+                    blended += m.weights[v] < 0.999f;
+                }
+            printf("skeleton: %u joints; %zu vertices, %zu bound to a joint other than the first, %zu blended between joints\n",
+                   skeleton.jointCount, total, skinned, blended);
             printf("%zu meshes, %zu triangles, %zu entries not decoded\n", meshes.size(), tris, skipped);
             return 0;
         }

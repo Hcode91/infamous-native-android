@@ -22,11 +22,27 @@ in the header lead to:
 
 The joint names are stored as object ids after the tables, three entries ahead of the matrices they name.
 
-**Joint palettes.** Each packed mesh record lists the joints it is skinned to as runs of
-`(u16 first joint, u16 count)`; the pointer is at record +0x50 and the number of runs is the high half of
-+0x38. Single-joint pieces are rigid (hats and heads on joint 168, a holster on joint 195). Per-vertex data
-at +0x3C (control bytes), +0x40 and +0x44 (16-bit offsets into the palette in steps of 0x30, the size of
-a matrix) and +0x48 (weights) give each vertex's influences. The vertex count is at record +0x60.
+**Skinning tables (solved).** Each packed record carries, from its start: +0x30 `u16` number of control
+bytes and `u16` bytes of uniform matrix entries; +0x34 `u16` bytes of per-vertex matrix entries and `u16`
+weight bytes; +0x38 `u16` number of palette runs; pointers at +0x3C (control bytes), +0x40 (uniform
+entries), +0x44 (per-vertex entries), +0x48 (weights) and +0x50 (palette runs of `u16 first joint, u16
+count`). A matrix entry is a `u16`: the palette index times 0x30 (the size of a matrix), with bit 2 set when
+another joint follows for that vertex. One control byte covers four vertices:
+
+| Code | Meaning |
+|---|---|
+| 04 | read one uniform entry: all four vertices rigid to that joint |
+| 00 | the same joint as the last 04 |
+| 06 | read uniform entries until one without bit 2; for each, a row of four byte weights |
+| 02 | read four per-vertex entries: each vertex rigid to its own joint |
+| 0A | read rows of four per-vertex entries, each with a row of four weights, until no vertex continues |
+| 08 | end |
+
+**Verified** on all 292 skinned records of four packs (cop, reaper, trash golem, `core.xpp`): every
+stream is consumed exactly, every vertex's weights sum to 255, and every palette index is in range. Each
+vertex's heaviest joint is the one beside it (hands: median 2.9 cm from the joint), apart from a handful
+of vertices (2 of 669 in the cop's hands) that land on the opposite side, which points at a detail of
+the 0A case not yet understood.
 
 ## Mesh entries and positions (solved)
 
@@ -79,6 +95,6 @@ them is not known, so the engine shows all of them.
 
 ## Not solved
 
-- The exact layout of the per-vertex influence tables for more than two joints, needed to pose a character.
+- The joint hierarchy's parent links and rest pose, needed (with the tables above) to pose a character.
 - Material and texture swaps and body proportions of variants; which of several same-named meshes is used.
 - Animation clips: see [animation.md](animation.md).

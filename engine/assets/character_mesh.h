@@ -17,6 +17,10 @@ struct PackedMesh {
     std::vector<float> positions;                          // x, y, z per vertex, model space (bind pose)
     std::vector<float> uvs;                                // u, v per vertex
     bool optional = false;                                 // hidden unless a variant names the mesh
+    // Skinning: up to four joints per vertex (indexes into the pack's skeleton) and their weights, which
+    // sum to 1. Empty when the mesh has no skinning tables.
+    std::vector<uint16_t> joints;                          // 4 per vertex
+    std::vector<float> weights;                            // 4 per vertex
     std::vector<uint32_t> indices;                         // triangle list over all records of the mesh
     uint32_t records = 0;
 };
@@ -24,6 +28,17 @@ struct PackedMesh {
 // Finds every mesh entry in a pack and decodes its records. Entries whose records cannot be decoded are
 // left out and counted in `skipped` when it is given.
 std::vector<PackedMesh> readPackedMeshes(const Pack& pack, size_t* skipped = nullptr);
+
+// The joint hierarchy block of a character pack ("JH").
+struct Skeleton {
+    uint32_t offset = 0;                 // data-area offset of the block
+    uint32_t jointCount = 0;
+    std::vector<float> inverseBind;      // 12 floats per joint: 3x4, rows, model space to joint space
+    std::vector<uint32_t> nameOids;      // one per joint
+};
+
+// Finds the first joint hierarchy in a pack; jointCount is 0 when there is none.
+Skeleton readSkeleton(const Pack& pack);
 
 // A character variant ("flavor"): which optional meshes it shows. The names it lists also include
 // materials and textures it swaps in, which are not applied yet.
