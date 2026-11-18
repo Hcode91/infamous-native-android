@@ -13,9 +13,10 @@ records, its joint hierarchy and pose, and a table of piece entries pointing at 
 version `0x010A`, then 16-bit counts: 117 animated joints, 29 more, and 211 (`0xD3`) joints in all. Offsets
 in the header lead to:
 
-- +0x50: one pose entry per joint, 48 bytes: translation (x, y, z, 0), scale (x, y, z, 0), rotation as a
-  quaternion (x, y, z, w). Units are centimetres, Z up: joint 1 sits at 118.3 (hips), the head joints at
-  about 170.
+- +0x28 of the header: offset of the links, 16 bytes a joint: flags (not decoded), parent, first child,
+  next sibling (-1 for none).
+- +0x2C: offset (0x60) of the rest pose, 48 bytes a joint, relative to the parent: scale (x, y, z, 0),
+  rotation as a quaternion (x, y, z, w), translation (x, y, z, 0). Centimetres, Z up.
 - +0x4440: 211 matrices of 3x4 floats (rows, translation in the fourth column). Inverted, they give the
   joints' positions in the bind pose: hips at 118, head at 170, arms straight out at about +-80 along Y
   (a T pose). Some carry a non-uniform scale (the variant's body proportions).
@@ -43,6 +44,10 @@ stream is consumed exactly, every vertex's weights sum to 255, and every palette
 vertex's heaviest joint is the one beside it (hands: median 2.9 cm from the joint), apart from a handful
 of vertices (2 of 669 in the cop's hands) that land on the opposite side, which points at a detail of
 the 0A case not yet understood.
+
+**Posing (verified).** World matrices built from the rest pose through the parent links, times the inverse
+bind matrices, with the weights above, give an intact figure: the cop keeps its shape with slightly
+different proportions and its mouth open. A few vertices at the trouser hems and neck stick out.
 
 ## Mesh entries and positions (solved)
 
@@ -95,6 +100,6 @@ them is not known, so the engine shows all of them.
 
 ## Not solved
 
-- The joint hierarchy's parent links and rest pose, needed (with the tables above) to pose a character.
+- The joint flags, and why the rest pose differs slightly from the bind pose (it reads as the base body before a variant's proportions).
 - Material and texture swaps and body proportions of variants; which of several same-named meshes is used.
 - Animation clips: see [animation.md](animation.md).

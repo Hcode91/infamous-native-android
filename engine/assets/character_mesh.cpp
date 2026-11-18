@@ -278,21 +278,100 @@ std::vector<CharacterVariant> readCharacterVariants(const Pack& pack, uint32_t v
 }
 
 // Joint hierarchy block: magic "JH", u16 version 0x010A, ..., u16 joint count at +0x0C; offsets from the
-// block at +0x38 (names, as object ids; the first three are not joints) and +0x44 (inverse bind matrices).
+// block at +0x28 (16 bytes a joint: flags, parent, first child, next sibling), +0x2C (rest pose, 48 bytes a
+// joint), +0x38 (names, as object ids; the first three are not joints) and +0x44 (inverse bind matrices).
 Skeleton readSkeleton(const Pack& pack) {
     Skeleton s;
     const auto data = pack.data();
     for (size_t at = 0; at + 0x50 <= data.size(); at += 16) {
         if (data[at] != 'J' || data[at + 1] != 'H' || data[at + 2] != 1 || data[at + 3] != 0x0A) continue;
         const uint32_t n = u16(data, at + 0x0C), names = pack.word(at + 0x38), binds = pack.word(at + 0x44);
-        if (n == 0 || n > 1024 || at + binds + size_t(n) * 48 > data.size() || at + names + (size_t(n) + 3) * 4 > data.size()) continue;
+        const uint32_t links = pack.word(at + 0x28), pose = pack.word(at + 0x2C);
+        if (n == 0 || n > 1024 || at + binds + size_t(n) * 48 > data.size() || at + names + (size_t(n) + 3) * 4 > data.size() ||
+            at + links + size_t(n) * 16 > data.size() || at + pose + size_t(n) * 48 > data.size())
+            continue;
         s.offset = uint32_t(at);
         s.jointCount = n;
         for (uint32_t i = 0; i < n * 12; i++) s.inverseBind.push_back(f32(pack, at + binds + size_t(i) * 4));
         for (uint32_t i = 0; i < n; i++) s.nameOids.push_back(pack.word(at + names + (size_t(i) + 3) * 4));
+        for (uint32_t i = 0; i < n * 12; i++) s.restPose.push_back(f32(pack, at + pose + size_t(i) * 4));
+        for (uint32_t i = 0; i < n; i++) {
+            s.flags.push_back(pack.word(at + links + size_t(i) * 16));
+            const int32_t parent = int32_t(pack.word(at + links + size_t(i) * 16 + 4));
+            s.parents.push_back(parent >= 0 && uint32_t(parent) < n && uint32_t(parent) != i ? parent : -1);
+        }
         break;
     }
     return s;
+}
+
+std::vector<float> poseToWorld(const Skeleton& s, const std::vector<float>& pose) {
+    const size_t n = s.jointCount;
+    std::vector<float> world(n * 12, 0.0f);
+    std::vector<uint8_t> done(n, 0);
+    if (pose.size() < n * 12) return world;
+    auto local = [&](size_t i, float m[12]) {
+        const float* e = &pose[i * 12];
+        const float x = e[4], y = e[5], z = e[6], w = e[7];
+        const float r[9] = {1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w), 2 * (x * y + z * w), 1 - 2 * (x * x + z * z),
+                            2 * (y * z - x * w), 2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)};
+        for (int row = 0; row < 3; row++) {
+            for (int col = 0; col < 3; col++) m[row * 4 + col] = r[row * 3 + col] * e[col];
+            m[row * 4 + 3] = e[8 + row];
+        }
+    };
+    // parents can come after their children in the table, so resolve by walking up (depth is bounded)
+    for (size_t i = 0; i < n; i++) {
+        std::vector<size_t> chain;
+        for (size_t j = i; !done[j] && chain.size() <= n;) {
+            chain.push_back(j);
+            if (s.parents[j] < 0) break;
+            j = size_t(s.parents[j]);
+        }
+        for (size_t k = chain.size(); k-- > 0;) {
+            const size_t j = chain[k];
+            if (done[j]) continue;
+            float l[12];
+            local(j, l);
+            float* out = &world[j * 12];
+            if (s.parents[j] < 0 || !done[size_t(s.parents[j])]) {
+                memcpy(out, l, sizeof l);
+            } else {
+                const float* p = &world[size_t(s.parents[j]) * 12];
+                for (int row = 0; row < 3; row++)
+                    for (int col = 0; col < 4; col++)
+                        out[row * 4 + col] = p[row * 4] * l[col] + p[row * 4 + 1] * l[4 + col] + p[row * 4 + 2] * l[8 + col] + (col == 3 ? p[row * 4 + 3] : 0.0f);
+            }
+            done[j] = 1;
+        }
+    }
+    return world;
+}
+
+std::vector<float> skinPositions(const PackedMesh& mesh, const Skeleton& s, const std::vector<float>& world) {
+    std::vector<float> out(mesh.positions.size(), 0.0f);
+    const size_t nv = mesh.positions.size() / 3;
+    if (mesh.joints.size() < nv * 4 || world.size() < size_t(s.jointCount) * 12) return mesh.positions;
+    // skin matrix per joint = world * inverse bind
+    std::vector<float> skin(size_t(s.jointCount) * 12);
+    for (size_t j = 0; j < s.jointCount; j++) {
+        const float* w = &world[j * 12];
+        const float* b = &s.inverseBind[j * 12];
+        for (int row = 0; row < 3; row++)
+            for (int col = 0; col < 4; col++)
+                skin[j * 12 + size_t(row * 4 + col)] = w[row * 4] * b[col] + w[row * 4 + 1] * b[4 + col] + w[row * 4 + 2] * b[8 + col] + (col == 3 ? w[row * 4 + 3] : 0.0f);
+    }
+    for (size_t v = 0; v < nv; v++) {
+        const float x = mesh.positions[v * 3], y = mesh.positions[v * 3 + 1], z = mesh.positions[v * 3 + 2];
+        for (int k = 0; k < 4; k++) {
+            const float wt = mesh.weights[v * 4 + size_t(k)];
+            const size_t j = mesh.joints[v * 4 + size_t(k)];
+            if (wt <= 0 || j >= s.jointCount) continue;
+            const float* m = &skin[j * 12];
+            for (int row = 0; row < 3; row++) out[v * 3 + size_t(row)] += wt * (m[row * 4] * x + m[row * 4 + 1] * y + m[row * 4 + 2] * z + m[row * 4 + 3]);
+        }
+    }
+    return out;
 }
 
 bool variantShows(const CharacterVariant& variant, const PackedMesh& mesh) {

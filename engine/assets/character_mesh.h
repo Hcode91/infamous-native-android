@@ -35,7 +35,18 @@ struct Skeleton {
     uint32_t jointCount = 0;
     std::vector<float> inverseBind;      // 12 floats per joint: 3x4, rows, model space to joint space
     std::vector<uint32_t> nameOids;      // one per joint
+    std::vector<int32_t> parents;        // one per joint; -1 for a root
+    std::vector<uint32_t> flags;         // one per joint (not decoded)
+    std::vector<float> restPose;         // 12 floats per joint, relative to the parent: scale xyz 0, rotation
+                                         // quaternion xyzw, translation xyz 0
 };
+
+// World matrices (12 floats per joint, 3x4 rows) of a pose given as `restPose` is: parent first, each
+// joint's translation * rotation * scale.
+std::vector<float> poseToWorld(const Skeleton& skeleton, const std::vector<float>& localPose);
+
+// Skins bind-pose positions: for each vertex the weighted sum over its joints of world * inverseBind * p.
+std::vector<float> skinPositions(const PackedMesh& mesh, const Skeleton& skeleton, const std::vector<float>& world);
 
 // Finds the first joint hierarchy in a pack; jointCount is 0 when there is none.
 Skeleton readSkeleton(const Pack& pack);

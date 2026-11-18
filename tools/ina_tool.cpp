@@ -322,8 +322,13 @@ int main(int argc, char** argv) {
                 for (const PackedMesh& m : meshes) shown += variantShows(variants[i], m);
                 printf("variant %zu %s: %zu meshes\n", i, variants[i].nameOid < names.size() ? names[variants[i].nameOid].c_str() : "?", shown);
             }
+            // a 7th argument "rest" skins the export with the hierarchy's rest pose instead of the bind pose
+            const Skeleton skel = readSkeleton(p);
+            const bool rest = argc > 7 && std::string(argv[7]) == "rest" && skel.jointCount;
+            const std::vector<float> world = rest ? poseToWorld(skel, skel.restPose) : std::vector<float>();
             FILE* obj = argc > 4 ? fopen(argv[4], "w") : nullptr;
-            for (const PackedMesh& m : meshes) {
+            for (PackedMesh m : meshes) {
+                if (rest) m.positions = skinPositions(m, skel, world);
                 if (pick >= 0 && size_t(pick) < variants.size() && !variantShows(variants[size_t(pick)], m)) continue;
                 printf("%-24s %s%u record(s), %zu vertices, %zu triangles, box %.1f %.1f %.1f .. %.1f %.1f %.1f\n",
                        m.nameOid < names.size() ? names[m.nameOid].c_str() : std::to_string(m.nameOid).c_str(), m.optional ? "(optional) " : "",
