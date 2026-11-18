@@ -45,7 +45,8 @@ Host tools and tests (Linux, needs CMake, Ninja and zlib):
 3. Wait for the one-time import (about 1 GB is copied).
 4. Use the Pack and Texture buttons to browse textures.
 5. Tap **World** to see a city sector in full detail, in its place in the city. Drag to turn, pinch to
-   zoom, and use the Pack buttons to change sector. **City** shows the whole city from far away.
+   zoom, and use the Pack buttons to change sector. **City** shows the whole city from far away, and **Person** stands a
+   character where the camera is looking.
 
 ## Licence
 

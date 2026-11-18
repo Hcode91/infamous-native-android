@@ -314,11 +314,20 @@ int main(int argc, char** argv) {
             const auto names = argc > 5 ? loadNames(argv[5]) : std::vector<std::string>();
             size_t skipped = 0, base = 1, tris = 0;
             const auto meshes = readPackedMeshes(p, &skipped);
+            // [variant number] as the 6th argument: only the meshes that variant shows
+            const auto variants = readCharacterVariants(p);
+            const int pick = argc > 6 ? atoi(argv[6]) : -1;
+            for (size_t i = 0; i < variants.size(); i++) {
+                size_t shown = 0;
+                for (const PackedMesh& m : meshes) shown += variantShows(variants[i], m);
+                printf("variant %zu %s: %zu meshes\n", i, variants[i].nameOid < names.size() ? names[variants[i].nameOid].c_str() : "?", shown);
+            }
             FILE* obj = argc > 4 ? fopen(argv[4], "w") : nullptr;
             for (const PackedMesh& m : meshes) {
-                printf("%-24s %u record(s), %zu vertices, %zu triangles, box %.1f %.1f %.1f .. %.1f %.1f %.1f\n",
-                       m.nameOid < names.size() ? names[m.nameOid].c_str() : std::to_string(m.nameOid).c_str(), m.records,
-                       m.positions.size() / 3, m.indices.size() / 3, m.boxMin[0], m.boxMin[1], m.boxMin[2], m.boxMax[0], m.boxMax[1], m.boxMax[2]);
+                if (pick >= 0 && size_t(pick) < variants.size() && !variantShows(variants[size_t(pick)], m)) continue;
+                printf("%-24s %s%u record(s), %zu vertices, %zu triangles, box %.1f %.1f %.1f .. %.1f %.1f %.1f\n",
+                       m.nameOid < names.size() ? names[m.nameOid].c_str() : std::to_string(m.nameOid).c_str(), m.optional ? "(optional) " : "",
+                       m.records, m.positions.size() / 3, m.indices.size() / 3, m.boxMin[0], m.boxMin[1], m.boxMin[2], m.boxMax[0], m.boxMax[1], m.boxMax[2]);
                 tris += m.indices.size() / 3;
                 if (obj) {
                     for (size_t v = 0; v + 2 < m.positions.size(); v += 3) fprintf(obj, "v %g %g %g\n", m.positions[v], m.positions[v + 1], m.positions[v + 2]);

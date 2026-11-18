@@ -20,6 +20,9 @@ object Native {
     /** Shows the whole city as drawn from far away. Returns a description. */
     @JvmStatic external fun city(): String
 
+    /** Stands a character at the camera target in its bind pose, stepping variants by [delta]. Returns a description. */
+    @JvmStatic external fun character(delta: Int): String
+
     /** Moves the world camera over the ground by a fraction of the screen (right and up positive). */
     @JvmStatic external fun pan(dx: Float, dy: Float)
 

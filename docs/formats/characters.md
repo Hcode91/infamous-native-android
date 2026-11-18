@@ -61,11 +61,24 @@ entries decode. The engine reads them with `readPackedMeshes`.
 The joint matrices are ordinary inverse bind matrices (model space to joint space), so skinning is the
 usual weighted sum over a vertex's joints of `joint world matrix * inverse bind * position`.
 
+## Texture coordinates, materials and variants
+
+- Stream 0 of a packed record is 10 bytes a vertex: a colour (4 bytes), texture coordinates as two
+  half-floats, and a half-float that is 1 or -1. Checked on the cop meshes: the coordinates lie in 0..1.
+- A mesh entry's material pointer is an ordinary material (shader object), with the same texture table
+  as world materials.
+- Just before the array of mesh entries is a table of 10-byte pieces, one per mesh (`u16 flags, u16 0,
+  u16 mesh index, u16 0, s16`). Flag 0x8000 marks an optional mesh (hats, hair, faces, jackets, glasses).
+- A variant object (class `CID_FlavorData`, 0x50 bytes; the cop pack has 25, `blackCop1` ... `asianCop6`)
+  points to a property list. Groups starting `0x34040000` name things: with type 1, an optional mesh to
+  show; with type 3, a material or texture to swap in (not applied yet). Groups starting `0x34100000`
+  carry three floats and a joint number: per-variant body proportions (not applied yet).
+
+Several meshes can share a name (four `blackHair` meshes in the cop pack); how the game picks among
+them is not known, so the engine shows all of them.
+
 ## Not solved
 
-- The exact layout of the per-vertex influence tables (the control bytes select how many joints the next
-  four vertices use; byte weights follow), needed to pose a character.
-- Which entries of the 10-byte stream are the texture coordinates (it holds a colour and three
-  half-floats).
-- How a variant picks its meshes and materials.
+- The exact layout of the per-vertex influence tables for more than two joints, needed to pose a character.
+- Material and texture swaps and body proportions of variants; which of several same-named meshes is used.
 - Animation clips: see [animation.md](animation.md).

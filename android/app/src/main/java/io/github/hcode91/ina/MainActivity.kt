@@ -40,6 +40,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private var cityMode = false
     private lateinit var modeButton: Button
     private lateinit var cityButton: Button
+    private lateinit var personButton: Button
+    private var personNote = ""
     private var lastX = 0f
     private var lastY = 0f
     private var midX = 0f
@@ -126,6 +128,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 cityMode = false
                 cityButton.text = "City"
                 cityButton.visibility = if (worldMode) View.VISIBLE else View.GONE
+                personButton.visibility = if (worldMode) View.VISIBLE else View.GONE
+                personNote = ""
                 text = if (worldMode) "Textures" else "World"
                 if (worldMode) showWorld(0) else { Native.hideWorld(); step(0, 0) }
             }
@@ -143,6 +147,19 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             }
         }
         controls.addView(cityButton)
+        // In the world view: stands the next character variant where the camera is looking.
+        personButton = Button(this).apply {
+            text = "Person"
+            visibility = View.GONE
+            setOnClickListener {
+                if (!opened || !worldMode) return@setOnClickListener
+                thread {
+                    val text = Native.character(1)
+                    ui.post { personNote = text }
+                }
+            }
+        }
+        controls.addView(personButton)
         controls.visibility = View.GONE
         root.addView(controls, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
 
@@ -160,7 +177,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             override fun run() {
                 if (opened) {
                     stats.text = Native.status()
-                    if (worldMode) Native.worldStatus().let { if (it.isNotEmpty()) info.text = it }
+                    if (worldMode) Native.worldStatus().let { if (it.isNotEmpty()) info.text = if (personNote.isEmpty()) it else it + "\n" + personNote }
                 }
                 ui.postDelayed(this, 500)
             }

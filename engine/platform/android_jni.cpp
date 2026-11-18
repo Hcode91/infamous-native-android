@@ -19,6 +19,7 @@
 #include <thread>
 #include <vector>
 
+#include "assets/character_mesh.h"
 #include "assets/collision.h"
 #include "assets/hex_map.h"
 #include "assets/pack.h"
@@ -78,6 +79,9 @@ struct State {
     float target[3] = {0, 0, 0};
     float yaw = 0.7f, pitch = 0.45f, distance = 200.0f;
     std::string here;                        // the sector the target is in
+    std::vector<size_t> characterPacks;      // indexes into `packs` of the character variant packs
+    size_t characterPack = 0, characterVariant = 0;
+    bool characterShown = false;
     std::shared_ptr<GroundGrid> ground;      // collision of the sector held at full detail
     std::string groundSector;
     std::string loaderNote;                  // what the loader is doing
@@ -522,6 +526,13 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_open(JNIEnv* env, jc
                 std::all_of(n.begin() + 1, n.begin() + long(dot), [](char c) { return c >= '0' && c <= '9'; }))
                 g.sectors.push_back(i);
         }
+        g.characterPacks.clear();
+        for (size_t i = 0; i < g.packs.size(); i++) {
+            const std::string& n = g.archives[g.packs[i].archive]->entries()[g.packs[i].entry].name;
+            if (n.find("_flavors") != std::string::npos) g.characterPacks.push_back(i);
+        }
+        g.characterPack = g.characterVariant = 0;
+        g.characterShown = false;
         g.sector = 0;
         g.pack = g.texture = 0;
         loadPack();
@@ -655,6 +666,92 @@ JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_camera(JNIEnv*, jclass,
     g.yaw += dyaw;
     g.pitch = std::clamp(g.pitch + dpitch, -1.45f, 1.45f);
     g.distance = std::clamp(g.distance * zoom, 2.0f, 400000.0f);
+}
+
+// Stands a character at the camera target, in its bind pose: the next variant (by `delta`) of the
+// character packs, moving on to the next pack after a pack's last variant.
+JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_character(JNIEnv* env, jclass, jint delta) {
+    std::string msg;
+    try {
+        PackRef ref;
+        float at[3];
+        {
+            std::lock_guard<std::mutex> l(g.lock);
+            if (g.characterPacks.empty()) return env->NewStringUTF("No character packs found");
+            if (!g.worldOn) return env->NewStringUTF("Open the world view first");
+            ref = g.packs[g.characterPacks[g.characterPack]];
+            for (int k = 0; k < 3; k++) at[k] = g.target[k];
+        }
+        std::vector<uint8_t> bytes = g.archives[ref.archive]->read(ref.entry);
+        auto pack = std::make_unique<Pack>(bytes);
+        auto variants = readCharacterVariants(*pack);
+        {
+            // step the variant; past either end, move to the neighbouring pack
+            std::lock_guard<std::mutex> l(g.lock);
+            long v = long(g.characterVariant) + (g.characterShown ? delta : 0);
+            const long packs = long(g.characterPacks.size());
+            if (variants.empty() || v < 0 || v >= long(variants.size())) {
+                g.characterPack = size_t(((long(g.characterPack) + (v < 0 ? -1 : 1)) % packs + packs) % packs);
+                ref = g.packs[g.characterPacks[g.characterPack]];
+                v = -1;
+            }
+            g.characterVariant = size_t(std::max(0l, v));
+            if (v < 0) {
+                bytes = g.archives[ref.archive]->read(ref.entry);
+                pack = std::make_unique<Pack>(bytes);
+                variants = readCharacterVariants(*pack);
+                g.characterVariant = 0;
+            }
+            g.characterShown = true;
+        }
+        const std::string packName = g.archives[ref.archive]->entries()[ref.entry].name;
+        const std::vector<PackedMesh> meshes = readPackedMeshes(*pack);
+        const CharacterVariant* variant = g.characterVariant < variants.size() ? &variants[g.characterVariant] : nullptr;
+        SceneBuilder builder;
+        const float identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        size_t shown = 0;
+        for (const PackedMesh& m : meshes) {
+            if (variant ? !variantShows(*variant, m) : m.optional) continue;
+            StaticMesh s;
+            s.nameOid = m.nameOid;
+            s.positions = m.positions;
+            s.uvs = m.uvs;
+            s.indices = m.indices;
+            if (m.materialOffset) {
+                for (const auto& [slot, oid] : readMaterialTextures(*pack, m.materialOffset))
+                    if (slot == 0) s.colorTextureOid = oid;
+                const uint32_t effect = size_t(m.materialOffset) + 20 <= pack->data().size() ? pack->word(size_t(m.materialOffset) + 16) : 0;
+                if (effect < g.names.size()) s.mode = drawModeForEffect(g.names[effect]);
+                if (s.mode == DrawMode::Decal || s.mode == DrawMode::Invisible) s.mode = DrawMode::Opaque;
+            }
+            builder.add(s, identity, at);
+            shown++;
+        }
+        State::Job j;
+        j.kind = State::Job::Add;
+        j.sector = "@character";
+        Chunk ch;
+        const size_t triangles = builder.triangles();
+        ch.scene = builder.finish();
+        j.chunks.push_back(std::move(ch));
+        const auto own = textureIndex(*pack);
+        std::set<uint64_t> have;
+        {
+            std::lock_guard<std::mutex> l(g.lock);
+            have = g.heldTextures;
+        }
+        j.textures = decodeChunkTextures(j.chunks, {{pack.get(), &own}, {g.core.get(), &g.coreTextures}}, 512,
+                                         [&](uint64_t k) { return have.count(k) != 0; });
+        const size_t textures = j.textures.size();
+        std::lock_guard<std::mutex> l(g.lock);
+        g.jobs.push_back(std::move(j));
+        g.distance = std::min(g.distance, 450.0f);
+        msg = packName + (variant && variant->nameOid < g.names.size() ? "  " + g.names[variant->nameOid] : "") + "\n" + std::to_string(shown) +
+              " meshes, " + std::to_string(triangles) + " triangles, " + std::to_string(textures) + " new textures (bind pose)";
+    } catch (const std::exception& e) {
+        msg = std::string("ERROR ") + e.what();
+    }
+    return env->NewStringUTF(msg.c_str());
 }
 
 // Moves the camera target over the ground: (dx, dy) in screen fractions, right and up positive. The step
