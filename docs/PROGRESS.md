@@ -40,7 +40,7 @@ Last updated: 2026-11-19. Tested against the EU disc release (BCES00220).
 | Area | State |
 |---|---|
 | World viewer, streaming | Sectors load and unload as the camera moves; two fingers move the camera, which stays on the ground |
-| Title view and first play | On launch: the opening mission's first camera shot, held on its first frame behind the game's logo (both read from the user's files); a tap plays the 15-second shot, then hands over to the player. A tap puts the player character there: left thumb moves him (idle and run clips, blended), right thumb turns the camera, he follows the collision ground and falls off edges. No walls, jumping, climbing, powers, enemies, sound or missions |
+| Title view and first play | On launch the opening mission's own script runs in the script machine and decides the sequence: black, fade in on the first camera shot's first frame, then the logo and prompt (all read from the user's files); a tap is the start button; the script then plays the 15-second shot and waits for it. Of what the script asks for, only the black cover, the prompt, the button and the first camera are implemented; the blast's effects, sound, time of day, the second camera, spawned objects and everything after the first function are not, so when that function returns the app hands over to the player: left thumb moves him (idle and run clips, blended), right thumb turns the camera, he follows the collision ground. Not run on a device yet |
 | World viewer, props | The cop's pistol rides in his right hand |
 | World viewer, whole city | Draws the far-away city on its own |
 
@@ -70,8 +70,10 @@ None yet. No figure will be reported here until it has been measured on a device
 The goal is the game's real opening: logo over the opening shot, start, the blast, the cutscene, the first
 objectives. That sequence is the opening mission's script, so the order is:
 
-1. The script machine: the full instruction set, then how scripts attach to objects and events.
-2. A script machine in this engine, and the game functions the opening calls, one at a time (title
-   objects, time of day, cameras, effects, warps, player switches, prompts and text, fades).
-3. Sky, lighting and fog from the opening's cube maps.
-4. Run the title view and first play (already built) on a device.
+1. Run this build on a device: the scripted title, start and first shot.
+2. Deliver the shot's labelled moments to the script (its label handler drives the blast), then the engine
+   functions that handler calls: camera jolts, the flash and fills, the exploding car and debris, sound.
+3. The second camera shot, then the next checkpoint's function: the warp, the cutscene and the first
+   objectives (prompts and text, player switches, dialogue).
+4. The machine's missing instructions (object creation, object lists) and script methods on spawned objects.
+5. Sky, lighting and fog from the opening's cube maps.

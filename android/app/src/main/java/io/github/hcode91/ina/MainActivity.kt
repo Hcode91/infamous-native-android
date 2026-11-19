@@ -54,6 +54,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var titleLayer: LinearLayout
     private lateinit var titleNote: TextView
     private lateinit var logoView: ImageView
+    private lateinit var coverView: View
     private lateinit var gameBar: LinearLayout
     private lateinit var stickView: StickView
     private var stickId = -1              // pointer ids of the finger on the stick and the one turning the camera
@@ -216,6 +217,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         stickView = StickView(this)
         stickView.radius = 60f * resources.displayMetrics.density
         root.addView(stickView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        // The black cover the opening script fades in and out.
+        coverView = View(this).apply {
+            setBackgroundColor(Color.BLACK)
+            alpha = 0f
+            isClickable = false
+        }
+        root.addView(coverView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         logoView = ImageView(this).apply { adjustViewBounds = true }
         titleNote = TextView(this).apply {
             setTextColor(Color.WHITE)
@@ -257,6 +265,26 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         setContentView(root)
 
         if (required.all { File(gameDir, it).length() > 0 }) openGame() else showNeedsImport()
+        // While the opening script runs it decides when the cover, the logo and the prompt show.
+        ui.post(object : Runnable {
+            override fun run() {
+                if (opened && gameMode) {
+                    val o = Native.opening()
+                    coverView.alpha = o[0]
+                    if (o[2] > 0f && titleLayer.visibility == View.VISIBLE && titleNote.text.toString() == "Tap to start") {
+                        val show = if (o[1] > 0f) View.VISIBLE else View.INVISIBLE
+                        logoView.visibility = show
+                        titleNote.visibility = show
+                    } else {
+                        logoView.visibility = View.VISIBLE
+                        titleNote.visibility = View.VISIBLE
+                    }
+                } else if (coverView.alpha != 0f) {
+                    coverView.alpha = 0f
+                }
+                ui.postDelayed(this, 33)
+            }
+        })
         ui.post(object : Runnable {
             override fun run() {
                 if (opened) {
@@ -301,7 +329,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun startPlay() {
-        if (!gameMode || playing || titleNote.text.toString() != "Tap to start") return
+        if (!gameMode || playing || titleNote.text.toString() != "Tap to start" || titleNote.visibility != View.VISIBLE) return
         titleNote.text = "Starting…"
         thread {
             val result = Native.startGame()

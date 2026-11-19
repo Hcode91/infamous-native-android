@@ -36,6 +36,9 @@ object Native {
     @JvmStatic external fun startGame(): String
 
     /** The movement stick: x right, y forward, each -1..1. */
+    /** What the opening script wants on screen: [black cover 0..1, prompt shown, script running]. */
+    @JvmStatic external fun opening(): FloatArray
+
     @JvmStatic external fun stick(x: Float, y: Float)
 
     /** Moves the world camera over the ground by a fraction of the screen (right and up positive). */

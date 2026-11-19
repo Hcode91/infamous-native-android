@@ -33,6 +33,7 @@
 #include "assets/world_mesh.h"
 #include "core/bytes.h"
 #include "render/vk_renderer.h"
+#include "script/script_host.h"
 #include "world/city_stream.h"
 #include "world/scene.h"
 
@@ -118,6 +119,20 @@ struct State {
         float anchor[3] = {0, 0, 0};
     };
     std::shared_ptr<Shot> shot;
+    // The opening as the game's own script runs it: the mission's entry function executes in the script
+    // machine and this is what it has asked for so far. Only the render thread touches the machine.
+    struct Opening {
+        std::unique_ptr<BasicScriptHost> host;
+        std::unique_ptr<ScriptMachine> vm;
+        bool started = false;
+        float fade = 1.0f, fadeTarget = 1.0f, fadeRate = 0.0f;   // black cover, 0 clear .. 1 black
+        bool cameraDone = false;
+        uint32_t mainThread = 0;
+        std::vector<std::string> unhandled;                    // what the script asked for that is not implemented
+    };
+    std::shared_ptr<Opening> opening;
+    std::atomic<float> coverUi{0};           // for the app's black cover and prompt
+    std::atomic<bool> promptUi{false}, scriptedUi{false}, pressed{false};
     double shotStart = -1;   // render-loop time the shot started playing at; < 0: held on frame 0
     bool shotPlaying = false;
     std::atomic<int> actorClip{-1};          // which clip the actor plays; -1: none (rest pose)
@@ -357,19 +372,115 @@ void animateActor(VkRenderer& r, double seconds, float dt) {
     r.updateChunkVertices(it->second[0], actor->vertices);
 }
 
+// Runs the opening mission's script and applies what it asks for. Implemented so far: the black cover
+// (the "fill_black" fill), the title prompt, the start button, and the first camera's start and wait.
+void driveOpening(double now, float dt) {
+    std::shared_ptr<State::Opening> o;
+    {
+        std::lock_guard<std::mutex> l(g.lock);
+        o = g.opening;
+    }
+    if (!o) {
+        g.scriptedUi.store(false);
+        return;
+    }
+    if (!o->started) {
+        o->started = true;
+        ScriptMachine& vm = *o->vm;
+        uint32_t fn = 0;
+        for (uint32_t i = 0; i < g.names.size(); i++) if (g.names[i] == "RunCheckpointPrologue") fn = i;
+        const int cls = vm.findClassWithFunction(fn);
+        if (cls >= 0) {
+            ScriptScope* self = vm.instance(size_t(cls));
+            if (const uint32_t code = vm.findFunction(size_t(cls), fn)) o->mainThread = vm.spawn(code, self)->id;
+        }
+    }
+    o->vm->update(now, dt);
+    if (o->fade != o->fadeTarget) {
+        const float step = o->fadeRate * dt;
+        o->fade = o->fade < o->fadeTarget ? std::min(o->fadeTarget, o->fade + step) : std::max(o->fadeTarget, o->fade - step);
+    }
+    g.coverUi.store(o->fade);
+    g.scriptedUi.store(true);
+    // When the entry function returns the script goes on to the next checkpoint (the cutscene and the first
+    // objectives), which needs engine features that do not exist yet: hand over to the player instead.
+    if (o->vm->finished(o->mainThread)) {
+        std::lock_guard<std::mutex> l(g.lock);
+        g.opening.reset();
+        g.shotPlaying = false;
+        g.shotStart = -1;
+        g.promptUi.store(false);
+        g.coverUi.store(0);
+        g.scriptedUi.store(false);
+        g.gameOn.store(true);
+    }
+}
+
+// Builds the script machine for the opening mission's pack and connects the engine features that exist.
+std::shared_ptr<State::Opening> makeOpening(const Pack& p) {
+    auto o = std::make_shared<State::Opening>();
+    o->host = std::make_unique<BasicScriptHost>(g.names);
+    o->vm = std::make_unique<ScriptMachine>(readScriptImage(p), *o->host);
+    if (o->vm->image().classes.empty()) return nullptr;
+    State::Opening* op = o.get();
+    o->host->onMethod = [op](ScriptCall& c, const std::string& object, const std::string& member) {
+        if (member == "JoyStickThunk.FIsButtonPressed") {
+            c.resultBool(g.pressed.load());
+            return true;
+        }
+        if (object == "fill_black") {   // the black cover: on, off, or faded out over a number of seconds
+            if (member == "Fill.trigger") { op->fadeTarget = 1.0f; op->fadeRate = 4.0f; return true; }
+            if (member == "Fill.UNTRIGGER") { op->fadeTarget = 0.0f; op->fadeRate = 4.0f; return true; }
+            if (member == "Fill.STOP") {
+                const float seconds = c.argFloat(0);
+                op->fadeTarget = 0.0f;
+                op->fadeRate = seconds > 0.01f ? 1.0f / seconds : 100.0f;
+                return true;
+            }
+        }
+        if (object == "uno_press_start") {
+            if (member == "Uno.trigger") { g.promptUi.store(true); return true; }
+            if (member == "Uno.UNTRIGGER" || member == "Uno.REMOVE") { g.promptUi.store(false); return true; }
+        }
+        return false;
+    };
+    o->host->onScriptMethod = [op](ScriptCall& c, const std::string& object, const std::string& member) {
+        if (object != "prxs_jb_intro_camera_1") return false;
+        if (member == "OnStart") {
+            std::lock_guard<std::mutex> l(g.lock);
+            g.shotPlaying = g.shot != nullptr;
+            g.shotStart = -1;
+            op->cameraDone = g.shot == nullptr;
+            return true;
+        }
+        if (member == "WaitForCamera") {
+            c.thread->waitFor = [op] { return op->cameraDone; };
+            c.thread->yielded = true;
+            return true;
+        }
+        return member == "SetCallbackObject";   // labels are not delivered yet
+    };
+    o->host->onUnhandled = [op](const std::string& s) {
+        if (op->unhandled.size() < 400) op->unhandled.push_back(s);
+    };
+    return o;
+}
+
 // The opening shot's camera: on its first frame while the title shows, then played through once; when it
 // ends the orbit camera and the stick take over.
 void driveShot(VkRenderer& r, double now) {
     std::shared_ptr<State::Shot> shot;
     double start;
-    bool playing;
+    bool playing, scripted = false, scriptedDone = false;
     {
         std::lock_guard<std::mutex> l(g.lock);
         shot = g.shot;
+        scripted = g.opening != nullptr;
+        scriptedDone = scripted && g.opening->cameraDone;
         if (shot && g.shotPlaying && g.shotStart < 0) g.shotStart = now;
         start = g.shotStart;
         playing = g.shotPlaying;
-        if (!shot || !(g.titleOn || playing)) shot.reset();
+        if (!shot || !(g.titleOn || playing || g.opening)) shot.reset();
     }
     if (!shot) {
         r.setFreeCamera(false);
@@ -379,11 +490,20 @@ void driveShot(VkRenderer& r, double now) {
     const float length = shot->clip.duration();
     if (playing && t >= length) {
         std::lock_guard<std::mutex> l(g.lock);
-        g.shotPlaying = false;
-        g.shotStart = -1;
-        g.gameOn.store(true);
-        r.setFreeCamera(false);
-        return;
+        if (scripted && g.opening) {
+            g.opening->cameraDone = true;   // the script is waiting for this; the camera rests on the last frame
+            g.shotPlaying = false;
+            g.shotStart = -1;
+            t = length - 1.0f / shot->clip.fps;
+        } else {
+            g.shotPlaying = false;
+            g.shotStart = -1;
+            g.gameOn.store(true);
+            r.setFreeCamera(false);
+            return;
+        }
+    } else if (!playing && scriptedDone) {
+        t = length - 1.0f / shot->clip.fps;
     }
     std::vector<float> pose = shot->skeleton.restPose;
     shot->clip.evaluate(t * shot->clip.fps, pose);
@@ -451,6 +571,7 @@ void renderLoop() {
             r.setCamera(target, yaw, pitch, distance);
         }
         animateActor(r, now, dt);
+        driveOpening(now, dt);
         driveShot(r, now);
         if (!r.drawFrame()) {
             std::lock_guard<std::mutex> l(g.lock);
@@ -858,6 +979,9 @@ JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_hideWorld(JNIEnv*, jcla
     g.held.clear();
     g.characterShown = false;
     g.titleOn = false;
+    g.opening.reset();
+    g.scriptedUi.store(false);
+    g.coverUi.store(0);
     g.shot.reset();
     g.shotPlaying = false;
     g.gameOn.store(false);
@@ -1042,10 +1166,16 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_title(JNIEnv* env, j
             found = findPackNamed(kIntroPack, &ref);
         }
         std::shared_ptr<State::Shot> shot;
+        std::shared_ptr<State::Opening> opening;
         if (found) {
             const std::vector<uint8_t> bytes = g.archives[ref.archive]->read(ref.entry);
             Pack p(bytes);
             found = objectPosition(p, "warp_cp_prologue", at);
+            try {
+                opening = makeOpening(p);
+            } catch (const std::exception&) {
+                opening.reset();   // without the script the title falls back to the plain flow
+            }
             // the opening shot: the animation "anim_intro" (its clip object "start"), the joint hierarchy the
             // node points at, and the anchor object "camera_parent" in the same file of the pack
             const AnimSet set = readAnimSet(p, g.names);
@@ -1092,6 +1222,11 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_title(JNIEnv* env, j
             g.overview = false;
             g.titleOn = true;
             g.shot = shot;
+            g.opening = opening;
+            g.pressed.store(false);
+            g.promptUi.store(false);
+            g.coverUi.store(opening ? 1.0f : 0.0f);
+            g.scriptedUi.store(opening != nullptr);
             g.shotStart = -1;
             g.shotPlaying = false;
             g.gameOn.store(false);
@@ -1227,9 +1362,14 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_startGame(JNIEnv* en
         std::lock_guard<std::mutex> l(g.lock);
         g.jobs.push_back(std::move(j));
         g.titleOn = false;
-        g.shotPlaying = g.shot != nullptr;   // the opening shot plays first; the stick takes over when it ends
-        g.shotStart = -1;
-        g.gameOn.store(!g.shotPlaying);
+        if (g.opening) {
+            g.pressed.store(true);   // the script is polling for this; it starts the shot itself
+            g.gameOn.store(false);
+        } else {
+            g.shotPlaying = g.shot != nullptr;   // the opening shot plays first; the stick takes over when it ends
+            g.shotStart = -1;
+            g.gameOn.store(!g.shotPlaying);
+        }
         g.stickX.store(0);
         g.stickY.store(0);
         g.distance = 420.0f;
@@ -1239,6 +1379,14 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_startGame(JNIEnv* en
         msg = std::string("ERROR ") + e.what();
     }
     return env->NewStringUTF(msg.c_str());
+}
+
+// What the opening script wants on screen: [black cover 0..1, prompt shown, script running].
+JNIEXPORT jfloatArray JNICALL Java_io_github_hcode91_ina_Native_opening(JNIEnv* env, jclass) {
+    const jfloat v[3] = {g.coverUi.load(), g.promptUi.load() ? 1.0f : 0.0f, g.scriptedUi.load() ? 1.0f : 0.0f};
+    jfloatArray a = env->NewFloatArray(3);
+    env->SetFloatArrayRegion(a, 0, 3, v);
+    return a;
 }
 
 // The movement stick: x right, y forward, each -1..1.
