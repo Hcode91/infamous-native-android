@@ -504,7 +504,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private var titleLoading = false
 
     private fun openGame() {
-        if (openingArchives || opened) return   // a second request while the first is still running would start the title twice
+        if (openingArchives) return   // a second request while the first is still running would start the title twice
         openingArchives = true
         info.text = "Opening archives…"
         thread {
