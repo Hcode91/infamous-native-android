@@ -15,4 +15,8 @@ Lights are components of entities (class `CID_LightData`, 2,211 of them). Observ
 | 0xC8 on | (pointer, count) pairs to parameter blocks, not decoded |
 
 The light volumes the deferred renderer draws are also in the sector geometry (effects `deferred_light_*`);
-their "material" is a different structure from a surface material. Colours have not been located yet.
+their "material" is a different structure from a surface material.
+
+A light's colour is in its property set (`Light.COLOR`, as hue in degrees, saturation, value; see
+`docs/formats/scripts.md`), for example 53, 0.4, 1.5 for a park lamp. Which light object each light volume in
+the sector geometry belongs to is not worked out yet.
