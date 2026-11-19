@@ -3,13 +3,32 @@
 Status: a clip decodes to joint transforms and a character plays it. **Verified** on the 170 clips of the
 cop variants pack: every clip parses, every key region has exactly the size the layout predicts, and decoded
 poses are right by construction tests (below). **Not known:** two flag bits on some rotation components,
-and how the game itself solves the legs. Float channels are parsed past but not used.
+how the game itself solves the legs, and how blend nodes mix their clips. Float channels are parsed past
+but not used.
 
-Clip objects (class `CID_AnimationClipData`) and the blend nodes around them (`AnimationData`,
-`AnimBlendStrafeData`, `AnimBlendRunData`, `AnimClipAimData`...) form blend trees. The key frames are in
-blocks with the magic `CD` (`0x4344`), version `0x0107`, inside the clip objects (170 in the cop variants
-pack). The game's strings name the library (`ice/anim`). Which named node uses which block is not worked
-out yet, so clips are addressed by number.
+## Named animations and clip blocks (decoded)
+
+Animation nodes are objects whose names start `anim_`: plain ones (`AnimationData`, class 0x1EC) and
+blend nodes (`AnimBlendStrafeData` 0x1EF, `AnimBlendRunData`, `AnimClipAimData`, parkour, melee...). A node
+holds (pointer, count) pairs to lists; a list entry points at a slot of the pack's object table, and the
+slot at a clip object (`AnimationClipData`, class 0x229, 0x70 bytes). A clip object's own data starts at
+the pointer at +0x34 (16-byte joint masks) and holds records `pointer to a clip block, f32 duration, ...`;
+blend sets hold several (one per direction or speed).
+
+- The shared pack has 880 nodes, 2,701 clip objects and 3,447 clip blocks; every block is reached.
+- The player's nodes are named `anim_messenger_...` (257 of them): `action_idle` (clip objects `settle`,
+  `crunch`, `standing`, `standing_dust_off`...), `strafe_run`, `blended_walk`, `jump_right_foot`...
+- A block's root transform (header +0x18) gives its movement over the clip. The player's run set has
+  blocks moving (330, 0, 0), (-300, 0, 0), (0, 250, 0), (0, -250, 0) in 0.67 s and a sprint of (400, 0, 0)
+  in 0.5 s: +X is forward, and the plain run is 495 cm/s.
+- How blend nodes weight their clips (direction, speed, aim angles) is **not decoded**; this engine picks
+  single blocks (the idle called `standing`, the forward run).
+
+The joint hierarchy a clip belongs to is the one whose animated joint count (`JH` +0x04) equals the
+clip's joint count: the shared pack has 102 hierarchies; the player's has 246 joints, 125 animated.
+
+The key frames are in blocks with the magic `CD` (`0x4344`), version `0x0107`, inside the clip objects'
+data. The game's strings name the library (`ice/anim`).
 
 ## Block header (big-endian)
 
@@ -108,5 +127,9 @@ layered over others, additive clips, blend nodes, float channels.
 
 ## Tools
 
-`ina_tool clips <archive> <pack> [oid_manifest.txt] [clip] [frame] [out.obj]` lists a pack's clips, or
-poses the pack's first variant at a frame and writes it as an OBJ.
+- `ina_tool clips <archive> <pack> [oid_manifest.txt] [clip] [frame] [out.obj]` lists a pack's clips, or
+  poses the pack's first variant at a frame and writes it as an OBJ.
+- `ina_tool anims <archive> <pack> <oid_manifest.txt> [name filter]` lists named animations with their
+  clip objects, blocks, durations and root movement.
+- `ina_tool pose <archive> <pack> <oid_manifest.txt> <variant> <animation> <block index> <frame> <out.obj>`
+  poses one variant in one frame of a named animation.

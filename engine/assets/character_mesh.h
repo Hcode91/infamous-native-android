@@ -5,6 +5,7 @@
 #include "assets/pack.h"
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace ina {
@@ -22,6 +23,7 @@ struct PackedMesh {
     std::vector<uint16_t> joints;                          // 4 per vertex
     std::vector<float> weights;                            // 4 per vertex
     std::vector<uint32_t> indices;                         // triangle list over all records of the mesh
+    bool rigid = false;                                    // no skinning tables at all: a prop, modelled around its own origin
     uint32_t records = 0;
 };
 
@@ -33,6 +35,7 @@ std::vector<PackedMesh> readPackedMeshes(const Pack& pack, size_t* skipped = nul
 struct Skeleton {
     uint32_t offset = 0;                 // data-area offset of the block
     uint32_t jointCount = 0;
+    uint32_t animatedJoints = 0;         // the first joints, which clips drive
     std::vector<float> inverseBind;      // 12 floats per joint: 3x4, rows, model space to joint space
     std::vector<uint32_t> nameOids;      // one per joint
     std::vector<int32_t> parents;        // one per joint; -1 for a root
@@ -51,15 +54,25 @@ std::vector<float> skinPositions(const PackedMesh& mesh, const Skeleton& skeleto
 // Finds the first joint hierarchy in a pack; jointCount is 0 when there is none.
 Skeleton readSkeleton(const Pack& pack);
 
+// Data-area offsets of every joint hierarchy in a pack (the shared pack holds dozens).
+std::vector<uint32_t> findSkeletons(const Pack& pack);
+// The hierarchy at one of those offsets; jointCount is 0 when it does not parse.
+Skeleton readSkeletonAt(const Pack& pack, uint32_t offset);
+
 // A character variant ("flavor"): which optional meshes it shows. The names it lists also include
 // materials and textures it swaps in, which are not applied yet.
 struct CharacterVariant {
+    uint32_t offset = 0;           // data-area offset of the variant object
     uint32_t nameOid = 0;
     std::vector<uint32_t> names;   // object ids named by the variant's property list
 };
 
 // Variants in a pack (objects of class `variantClass`, 0x21B in the EU disc release).
 std::vector<CharacterVariant> readCharacterVariants(const Pack& pack, uint32_t variantClass = 0x21B);
+
+// Large packs are several files merged together, each starting with a file object (class 0x228). Returns the
+// span [first, second) of the file that holds `offset`: a variant's meshes are the mesh entries in its file.
+std::pair<uint32_t, uint32_t> subFileRange(const Pack& pack, uint32_t offset, uint32_t fileClass = 0x228);
 
 // True when `variant` shows `mesh`: the mesh is not optional, or the variant names it.
 bool variantShows(const CharacterVariant& variant, const PackedMesh& mesh);

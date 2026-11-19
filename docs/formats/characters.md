@@ -53,8 +53,18 @@ opposite side of the body and flew off in animated poses.
 matrices, with the weights above, give an intact figure in the rest pose and in animated poses (see
 [animation.md](animation.md)).
 
-Not handled: props that are not skinned (the cop's pistol stays at the model origin instead of in his
-hand), and the helper joints that should bulge muscles and fix elbows and knees.
+**Props.** A mesh with no skinning tables (the cop's `gun_geo`) is modelled around its own origin. Carried
+by the joint `hold_object_right_palm` it sits in the hand, upright and pointing forward (checked by eye in
+the aiming clips; `wrist_right_gun` puts it backwards and upside down). That every such mesh belongs in
+the right hand is an assumption.
+
+**Variants in merged packs.** The shared pack is many files merged, each starting with a file object
+(class 0x228, `ProxyFileData`). A variant and its meshes can be in different files: the player's variant
+`flavor_hero` is in `messenger_rig.sprig`, his 13 meshes and his joint hierarchy in `messenger`. This
+engine takes a variant's meshes from the file holding a mesh it names, or else the file holding its
+joint hierarchy. The stored link from variant to model has not been found.
+
+Not handled: the helper joints that should bulge muscles and fix elbows and knees.
 
 ## Mesh entries and positions (solved)
 

@@ -46,6 +46,8 @@ public:
                       const float boxMin[3], const float boxMax[3]);   // returns the chunk id, 0 on failure
     // Replaces a chunk's vertex data in place (same vertex count as when it was added); for animated meshes.
     bool updateChunkVertices(uint32_t id, const std::vector<float>& vertices);
+    // Moves a chunk's culling box (for a chunk whose vertices are rewritten).
+    void setChunkBox(uint32_t id, const float boxMin[3], const float boxMax[3]);
     void removeChunk(uint32_t id);
     void setChunkVisible(uint32_t id, bool visible);
     void clearChunks();

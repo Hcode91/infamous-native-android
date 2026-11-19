@@ -19,6 +19,8 @@
 #include <thread>
 #include <vector>
 
+#include "anim/anim_set.h"
+#include "anim/character_loader.h"
 #include "anim/character_model.h"
 #include "anim/clip.h"
 #include "anim/leg_ik.h"
@@ -96,7 +98,17 @@ struct State {
         std::vector<LegChain> legs;
         std::vector<float> restWorld;
         std::vector<float> vertices;         // scratch, the layout of model->scene().vertices
+        // the player: clips[0] is the idle and clips[1] the run; moved by the stick on the render thread
+        bool player = false;
+        float pos[3] = {0, 0, 0}, heading = 0, runSpeed = 450.0f;
+        float idleTime = 0, runTime = 0, moving = 0;   // moving: 0 standing .. 1 running, for blending
+        bool placed = false;
     };
+    // game mode: a title view of the city, then the player character under stick control
+    bool titleOn = false;
+    std::atomic<bool> gameOn{false};
+    std::atomic<float> stickX{0}, stickY{0};
+    float spawn[3] = {0, 0, 0};
     std::atomic<int> actorClip{-1};          // which clip the actor plays; -1: none (rest pose)
     std::vector<std::string> actorClipNotes; // one line per clip, for the status text
 
@@ -228,20 +240,104 @@ void applyJob(VkRenderer& r, State::Job& j) {
     r.trimTextures(size_t(160) << 20);
 }
 
+// Blends two local poses (12 floats a joint): `t` of `b` over `a`, into `a`.
+void blendPoses(std::vector<float>& a, const std::vector<float>& b, float t) {
+    for (size_t j = 0; j + 12 <= a.size() && j + 12 <= b.size(); j += 12) {
+        for (int k : {0, 1, 2, 8, 9, 10}) a[j + size_t(k)] += (b[j + size_t(k)] - a[j + size_t(k)]) * t;
+        float dot = 0, len = 0;
+        for (int k = 4; k < 8; k++) dot += a[j + size_t(k)] * b[j + size_t(k)];
+        for (int k = 4; k < 8; k++) {
+            a[j + size_t(k)] += ((dot < 0 ? -b[j + size_t(k)] : b[j + size_t(k)]) - a[j + size_t(k)]) * t;
+            len += a[j + size_t(k)] * a[j + size_t(k)];
+        }
+        len = len > 0 ? 1.0f / std::sqrt(len) : 1.0f;
+        for (int k = 4; k < 8; k++) a[j + size_t(k)] *= len;
+    }
+}
+
+// The player: moves with the stick (relative to the camera), stays on the ground, runs or idles, and
+// takes the camera target along. There are no walls yet: only ledges up to head height stop him.
+void stepPlayer(VkRenderer& r, State::Actor& a, uint32_t chunk, float dt) {
+    const float sx = g.stickX.load(), sy = g.stickY.load();
+    const float mag = std::min(1.0f, std::sqrt(sx * sx + sy * sy));
+    float yaw;
+    std::shared_ptr<GroundGrid> ground;
+    {
+        std::lock_guard<std::mutex> l(g.lock);
+        yaw = g.yaw;
+        ground = g.ground;
+    }
+    float z = 0;
+    if (!a.placed && ground && ground->heightAt(a.pos[0], a.pos[1], a.pos[2] + 300.0f, &z)) {
+        a.pos[2] = z;
+        a.placed = true;
+    }
+    const float fx = -std::cos(yaw), fy = -std::sin(yaw), rx = fy, ry = -fx;
+    const bool go = mag > 0.15f;
+    if (go) {
+        float dx = rx * sx + fx * sy, dy = ry * sx + fy * sy;
+        const float dl = std::sqrt(dx * dx + dy * dy);
+        dx /= dl; dy /= dl;
+        const float step = a.runSpeed * std::max(mag, 0.4f) * dt;
+        const float nx = a.pos[0] + dx * step, ny = a.pos[1] + dy * step;
+        float hz = 0;
+        const bool blocked = ground && ground->heightAt(nx, ny, a.pos[2] + 250.0f, &hz) && hz > a.pos[2] + 70.0f;
+        if (!blocked) {
+            a.pos[0] = nx;
+            a.pos[1] = ny;
+        }
+        float turn = std::atan2(dy, dx) - a.heading;
+        while (turn > 3.14159265f) turn -= 6.2831853f;
+        while (turn < -3.14159265f) turn += 6.2831853f;
+        a.heading += turn * std::min(1.0f, dt * 12.0f);
+    }
+    if (ground && ground->heightAt(a.pos[0], a.pos[1], a.pos[2] + 70.0f, &z)) a.pos[2] = z >= a.pos[2] ? z : std::max(z, a.pos[2] - 1500.0f * dt);
+    a.moving += ((go ? 1.0f : 0.0f) - a.moving) * std::min(1.0f, dt * 10.0f);
+    a.idleTime += dt;
+    a.runTime += dt * std::max(mag, 0.4f);
+
+    const Skeleton& skel = a.model->skeleton();
+    std::vector<float> pose = skel.restPose;
+    auto play = [&](const AnimClip& clip, float time, std::vector<float>& out) {
+        const float length = clip.duration();
+        clip.evaluate((length > 0 ? std::fmod(time, length) : 0.0f) * clip.fps, out);
+    };
+    if (!a.clips.empty()) play(a.clips[0], a.idleTime, pose);
+    if (a.clips.size() > 1 && a.moving > 0.01f) {
+        std::vector<float> run = skel.restPose;
+        play(a.clips[1], a.runTime, run);
+        blendPoses(pose, run, a.moving);
+    }
+    const std::vector<float> world = poseToWorldWithLegs(skel, pose, a.restWorld, a.legs);
+    const float c = std::cos(a.heading), sn = std::sin(a.heading);
+    const float root[12] = {c, -sn, 0, a.pos[0], sn, c, 0, a.pos[1], 0, 0, 1, a.pos[2]};
+    if (a.vertices.size() != a.model->scene().vertices.size()) a.vertices = a.model->scene().vertices;
+    a.model->skin(world, a.vertices, root);
+    r.updateChunkVertices(chunk, a.vertices);
+    const float lo[3] = {a.pos[0] - 250, a.pos[1] - 250, a.pos[2] - 100}, hi[3] = {a.pos[0] + 250, a.pos[1] + 250, a.pos[2] + 300};
+    r.setChunkBox(chunk, lo, hi);
+    std::lock_guard<std::mutex> l(g.lock);
+    g.target[0] = a.pos[0];
+    g.target[1] = a.pos[1];
+    g.target[2] = a.pos[2] + 110.0f;
+}
+
 // Poses the animated character for the time since it started and rewrites its vertices.
-void animateActor(VkRenderer& r, double seconds) {
+void animateActor(VkRenderer& r, double seconds, float dt) {
     auto& actor = activeActor();
     if (!actor || !actor->model) return;
     const auto it = sectorChunks().find("@character");
     if (it == sectorChunks().end() || it->second.empty()) return;
+    if (actor->player) return stepPlayer(r, *actor, it->second[0], dt);
     const int pick = g.actorClip.load();
-    if (pick < 0 || size_t(pick) >= actor->clips.size()) return;
-    const AnimClip& clip = actor->clips[size_t(pick)];
     const Skeleton& skel = actor->model->skeleton();
     std::vector<float> pose = skel.restPose;
-    const float length = clip.duration();
-    const float t = length > 0 ? float(std::fmod(seconds, double(length))) : 0.0f;
-    clip.evaluate(t * clip.fps, pose);
+    if (pick >= 0 && size_t(pick) < actor->clips.size()) {
+        const AnimClip& clip = actor->clips[size_t(pick)];
+        const float length = clip.duration();
+        const float t = length > 0 ? float(std::fmod(seconds, double(length))) : 0.0f;
+        clip.evaluate(t * clip.fps, pose);
+    }
     const std::vector<float> world = poseToWorldWithLegs(skel, pose, actor->restWorld, actor->legs);
     if (actor->vertices.size() != actor->model->scene().vertices.size()) actor->vertices = actor->model->scene().vertices;
     actor->model->skin(world, actor->vertices);
@@ -256,7 +352,11 @@ void renderLoop() {
         return;
     }
     const auto started = std::chrono::steady_clock::now();
+    double last = 0;
     while (g.run.load()) {
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        const float dt = float(std::min(0.1, now - last));
+        last = now;
         Image img;
         bool have = false;
         {
@@ -280,6 +380,7 @@ void renderLoop() {
                     g.jobs.pop_front();
                     if (add) break;
                 }
+                if (g.titleOn) g.yaw += 0.06f * dt;   // the title view turns slowly
                 target[0] = g.target[0]; target[1] = g.target[1]; target[2] = g.target[2];
                 yaw = g.yaw; pitch = g.pitch; distance = g.distance;
             }
@@ -292,7 +393,7 @@ void renderLoop() {
             }
             r.setCamera(target, yaw, pitch, distance);
         }
-        animateActor(r, std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+        animateActor(r, now, dt);
         if (!r.drawFrame()) {
             std::lock_guard<std::mutex> l(g.lock);
             g.renderError = r.error();
@@ -430,7 +531,7 @@ void loaderLoop() {
                         std::lock_guard<std::mutex> l(g.lock);
                         g.ground = ground;
                         g.groundSector = w.sector;
-                        if (ground->heightAt(g.target[0], g.target[1], g.target[2] + 5000.0f, &gz)) g.target[2] = gz;
+                        if (!g.gameOn.load() && ground->heightAt(g.target[0], g.target[1], g.target[2] + 5000.0f, &gz)) g.target[2] = gz;
                     }
                     const auto own = textureIndex(p);
                     std::set<uint64_t> have;
@@ -497,6 +598,8 @@ std::string worldStatus() {   // caller holds the lock
     s += "  |  " + std::to_string(detail) + " sectors in detail, " + std::to_string(g.chunkCount.load()) + " chunks, drawing " +
          std::to_string(g.drawnChunks.load()) + " (" + std::to_string(g.drawnTriangles.load() / 1000) + "k triangles)";
     if (!g.loaderNote.empty()) s += "\n" + g.loaderNote + "...";
+    else if (g.gameOn.load()) s += "\nLeft thumb moves, right thumb turns the camera.";
+    else if (g.titleOn) s += "";
     else s += "\nDrag to turn, pinch to zoom, two fingers to move.";
     return s;
 }
@@ -696,6 +799,8 @@ JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_hideWorld(JNIEnv*, jcla
     g.jobs.clear();
     g.held.clear();
     g.characterShown = false;
+    g.titleOn = false;
+    g.gameOn.store(false);
     g.actorClipNotes.clear();
     g.actorClip.store(-1);
     State::Job j;
@@ -714,8 +819,8 @@ JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_hideWorld(JNIEnv*, jcla
 JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_camera(JNIEnv*, jclass, jfloat dyaw, jfloat dpitch, jfloat zoom) {
     std::lock_guard<std::mutex> l(g.lock);
     g.yaw += dyaw;
-    g.pitch = std::clamp(g.pitch + dpitch, -1.45f, 1.45f);
-    g.distance = std::clamp(g.distance * zoom, 2.0f, 400000.0f);
+    g.pitch = std::clamp(g.pitch + dpitch, g.gameOn.load() ? -0.3f : -1.45f, 1.45f);
+    g.distance = std::clamp(g.distance * zoom, g.gameOn.load() ? 150.0f : 2.0f, g.gameOn.load() ? 3000.0f : 400000.0f);
 }
 
 // Stands a character at the camera target and plays one of its pack's clips on it: the next variant (by `delta`) of the
@@ -774,6 +879,10 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_character(JNIEnv* en
         const size_t shown = parts.size();
         auto actor = std::make_shared<State::Actor>();
         Skeleton skel = readSkeleton(*pack);
+        // props without skinning (the pistol) ride in the right hand
+        const int hold = findJoint(skel, g.names, "hold_object_right_palm");
+        for (auto& part : parts)
+            if (part.mesh.rigid) part.attachJoint = hold;
         actor->legs = findLegChains(skel, g.names);
         actor->restWorld = poseToWorld(skel, skel.restPose);
         actor->clips = readAnimClips(*pack);
@@ -831,6 +940,213 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_clip(JNIEnv* env, jc
     if (pick < -1) pick = count - 1;
     g.actorClip.store(pick);
     return env->NewStringUTF(pick < 0 ? "rest pose" : g.actorClipNotes[size_t(pick)].c_str());
+}
+
+// A pack by file name (case as stored), or false.
+bool findPackNamed(const std::string& name, PackRef* out) {
+    for (const PackRef& ref : g.packs)
+        if (g.archives[ref.archive]->entries()[ref.entry].name == name) {
+            *out = ref;
+            return true;
+        }
+    return false;
+}
+
+constexpr const char* kIntroPack = "msn_jb_intro.sprig.xpp";
+
+// The position of a named object in a pack (objects carry scale, rotation and position from +0x40).
+bool objectPosition(const Pack& p, const char* name, float out[3]) {
+    for (uint32_t o : p.objects()) {
+        if (size_t(o) + 0x70 > p.data().size()) continue;
+        const uint32_t oid = p.word(size_t(o) + 0x0C);
+        if (oid >= g.names.size() || g.names[oid] != name) continue;
+        for (int k = 0; k < 3; k++) {
+            const uint32_t w = p.word(size_t(o) + 0x60 + size_t(k) * 4);
+            memcpy(&out[k], &w, 4);
+        }
+        return true;
+    }
+    return false;
+}
+
+// The title view: the city around the opening mission's first checkpoint, turning slowly.
+JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_title(JNIEnv* env, jclass) {
+    std::string msg = "OK";
+    try {
+        float at[3] = {0, 0, 0};
+        bool found = false;
+        PackRef ref;
+        {
+            std::lock_guard<std::mutex> l(g.lock);
+            if (g.sectors.empty() || !g.layout) return env->NewStringUTF("The city needs EMPIRE.xpp and oid_manifest.txt among the imported files");
+            found = findPackNamed(kIntroPack, &ref);
+        }
+        if (found) {
+            const std::vector<uint8_t> bytes = g.archives[ref.archive]->read(ref.entry);
+            Pack p(bytes);
+            found = objectPosition(p, "warp_cp_prologue", at);
+        }
+        if (!found) msg = "OK (opening checkpoint not found; starting at the city origin)";
+        stopLoader();
+        {
+            std::lock_guard<std::mutex> l(g.lock);
+            g.jobs.clear();
+            g.held.clear();
+            State::Job j;
+            j.kind = State::Job::Clear;
+            g.jobs.push_back(std::move(j));
+            g.worldOn = true;
+            g.overview = false;
+            g.titleOn = true;
+            g.gameOn.store(false);
+            g.characterShown = false;
+            g.actorClipNotes.clear();
+            g.actorClip.store(-1);
+            for (int k = 0; k < 3; k++) g.target[k] = g.spawn[k] = at[k];
+            g.distance = 2600.0f;
+            g.pitch = 0.28f;
+        }
+        startLoader();
+    } catch (const std::exception& e) {
+        msg = std::string("ERROR ") + e.what();
+    }
+    return env->NewStringUTF(msg.c_str());
+}
+
+// The game's logo from the opening mission's pack: 4 bytes width, 4 bytes height (little-endian), then
+// RGBA rows top to bottom. Empty when it is not there.
+JNIEXPORT jbyteArray JNICALL Java_io_github_hcode91_ina_Native_titleLogo(JNIEnv* env, jclass) {
+    std::vector<uint8_t> out;
+    try {
+        PackRef ref;
+        bool found;
+        {
+            std::lock_guard<std::mutex> l(g.lock);
+            found = findPackNamed(kIntroPack, &ref);
+        }
+        if (found) {
+            const std::vector<uint8_t> bytes = g.archives[ref.archive]->read(ref.entry);
+            Pack p(bytes);
+            for (const TextureInfo& t : p.textures()) {
+                if (t.oid >= g.names.size() || g.names[t.oid].find("infamous_logo") == std::string::npos || t.format == PixelFormat::Unknown) continue;
+                const Image img = decodeTexture(p, t);
+                out.resize(8 + img.rgba.size());
+                for (int k = 0; k < 4; k++) {
+                    out[size_t(k)] = uint8_t(img.width >> (8 * k));
+                    out[4 + size_t(k)] = uint8_t(img.height >> (8 * k));
+                }
+                // stored bottom row first
+                const size_t row = size_t(img.width) * 4;
+                for (uint32_t y = 0; y < img.height; y++) memcpy(&out[8 + size_t(y) * row], &img.rgba[size_t(img.height - 1 - y) * row], row);
+                break;
+            }
+        }
+    } catch (const std::exception&) {
+        out.clear();
+    }
+    jbyteArray arr = env->NewByteArray(jsize(out.size()));
+    if (arr && !out.empty()) env->SetByteArrayRegion(arr, 0, jsize(out.size()), reinterpret_cast<const jbyte*>(out.data()));
+    return arr;
+}
+
+// Starts play: the player character at the title view's checkpoint, with his idle and run clips.
+JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_startGame(JNIEnv* env, jclass) {
+    std::string msg;
+    try {
+        float at[3];
+        {
+            std::lock_guard<std::mutex> l(g.lock);
+            if (!g.core) return env->NewStringUTF("ERROR core.xpp is not among the imported files");
+            if (!g.worldOn) return env->NewStringUTF("ERROR the title view is not shown");
+            for (int k = 0; k < 3; k++) at[k] = g.spawn[k];
+        }
+        const Pack& core = *g.core;
+        const auto variants = readCharacterVariants(core);
+        const CharacterVariant* hero = findVariant(variants, g.names, "flavor_hero");
+        if (!hero) return env->NewStringUTF("ERROR the player's variant was not found (is oid_manifest.txt imported?)");
+        const AnimSet set = readAnimSet(core, g.names);
+        // idle: the clip object called "standing" of the idle animation; run: the forward clip of the strafe set
+        uint32_t idleBlock = 0, runBlock = 0;
+        float runSpeed = 450.0f;
+        if (const AnimNode* n = set.find(g.names, "anim_messenger_action_idle")) {
+            for (uint32_t k : n->clipObjects) {
+                const ClipObject& c = set.clips[k];
+                if (c.blocks.empty()) continue;
+                if (!idleBlock) idleBlock = c.blocks[0].block;
+                if (c.nameOid < g.names.size() && g.names[c.nameOid] == "standing") idleBlock = c.blocks[0].block;
+            }
+        }
+        if (const AnimNode* n = set.find(g.names, "anim_messenger_strafe_run")) {
+            for (uint32_t k : n->clipObjects)
+                for (const ClipRef& b : set.clips[k].blocks) {
+                    float m[3];
+                    if (runBlock || !clipRootMotion(core, b.block, m) || m[0] < 100.0f || std::fabs(m[1]) > 1.0f || b.duration <= 0) continue;
+                    runBlock = b.block;
+                    runSpeed = m[0] / b.duration;
+                }
+        }
+        if (!idleBlock) return env->NewStringUTF("ERROR the player's idle animation was not found");
+        auto actor = std::make_shared<State::Actor>();
+        actor->clips.push_back(readClipAt(core, idleBlock));
+        if (runBlock) actor->clips.push_back(readClipAt(core, runBlock));
+        Skeleton skel = skeletonForClips(core, actor->clips[0].joints, hero->offset);
+        if (!skel.jointCount) return env->NewStringUTF("ERROR the player's joint hierarchy was not found");
+        const int hold = findJoint(skel, g.names, "hold_object_right_palm");
+        std::vector<CharacterModel::Part> parts;
+        for (PackedMesh& m : variantMeshes(core, readPackedMeshes(core), *hero, skel.offset)) {
+            CharacterModel::Part part;
+            if (m.materialOffset) {
+                for (const auto& [slot, oid] : readMaterialTextures(core, m.materialOffset))
+                    if (slot == 0) part.textureOid = oid;
+                const uint32_t effect = size_t(m.materialOffset) + 20 <= core.data().size() ? core.word(size_t(m.materialOffset) + 16) : 0;
+                if (effect < g.names.size()) part.mode = drawModeForEffect(g.names[effect]);
+                if (part.mode == DrawMode::Decal || part.mode == DrawMode::Invisible) part.mode = DrawMode::Opaque;
+            }
+            if (m.rigid) part.attachJoint = hold;
+            part.mesh = std::move(m);
+            parts.push_back(std::move(part));
+        }
+        if (parts.empty()) return env->NewStringUTF("ERROR the player's meshes were not found");
+        const size_t shown = parts.size();
+        actor->legs = findLegChains(skel, g.names);
+        actor->restWorld = poseToWorld(skel, skel.restPose);
+        actor->model = std::make_unique<CharacterModel>(std::move(parts), std::move(skel), at);
+        actor->player = true;
+        actor->runSpeed = runSpeed;
+        for (int k = 0; k < 3; k++) actor->pos[k] = at[k];
+        State::Job j;
+        j.kind = State::Job::Add;
+        j.sector = "@character";
+        j.actor = actor;
+        Chunk ch;
+        const size_t triangles = actor->model->triangles();
+        ch.scene = actor->model->scene();
+        j.chunks.push_back(std::move(ch));
+        std::set<uint64_t> have;
+        {
+            std::lock_guard<std::mutex> l(g.lock);
+            have = g.heldTextures;
+        }
+        j.textures = decodeChunkTextures(j.chunks, {{g.core.get(), &g.coreTextures}}, 512, [&](uint64_t k) { return have.count(k) != 0; });
+        std::lock_guard<std::mutex> l(g.lock);
+        g.jobs.push_back(std::move(j));
+        g.titleOn = false;
+        g.gameOn.store(true);
+        g.stickX.store(0);
+        g.stickY.store(0);
+        g.distance = 420.0f;
+        g.pitch = 0.22f;
+        msg = "OK " + std::to_string(shown) + " meshes, " + std::to_string(triangles) + " triangles; run " + (runBlock ? std::to_string(int(runSpeed)) + " cm/s" : "clip not found");
+    } catch (const std::exception& e) {
+        msg = std::string("ERROR ") + e.what();
+    }
+    return env->NewStringUTF(msg.c_str());
+}
+
+// The movement stick: x right, y forward, each -1..1.
+JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_stick(JNIEnv*, jclass, jfloat x, jfloat y) {
+    g.stickX.store(std::clamp(float(x), -1.0f, 1.0f));
+    g.stickY.store(std::clamp(float(y), -1.0f, 1.0f));
 }
 
 // Moves the camera target over the ground: (dx, dy) in screen fractions, right and up positive. The step

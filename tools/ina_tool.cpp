@@ -5,7 +5,10 @@
 //   ina_tool meshes <archive.psarc_s> <pack name> [out.obj] [archive holding core.xpp] [oid_manifest.txt]   a sector, assembled
 //   ina_tool city <archive holding EMPIRE.xpp> [out.obj] [oid_manifest.txt]             the far-away city and its hex cells
 //   ina_tool clips <archive> <pack> [oid_manifest.txt] [clip] [frame] [out.obj]         animation clips; one clip posed
+//   ina_tool anims <archive> <pack> <oid_manifest.txt> [name filter]                    named animations and their clips
 #include "anim/character_model.h"
+#include "anim/anim_set.h"
+#include "anim/character_loader.h"
 #include "anim/clip.h"
 #include "anim/leg_ik.h"
 #include "assets/character_mesh.h"
@@ -305,6 +308,109 @@ int main(int argc, char** argv) {
             }
             return 0;
         }
+        if (cmd == "pose" && argc >= 9) {
+            // ina_tool pose <archive> <pack> <oid_manifest.txt> <variant> <animation> <clip index> <frame> <out.obj>:
+            // one variant in one frame of a named animation's clip block (index over all the animation's blocks)
+            const int idx = arc.find(argv[3]);
+            if (idx < 0) {
+                fprintf(stderr, "no pack named %s\n", argv[3]);
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            const auto names = loadNames(argv[4]);
+            const auto variants = readCharacterVariants(p);
+            const CharacterVariant* variant = findVariant(variants, names, argv[5]);
+            const AnimSet set = readAnimSet(p, names);
+            const AnimNode* node = set.find(names, argv[6]);
+            if (!variant || !node) {
+                fprintf(stderr, "%s not found\n", !variant ? "variant" : "animation");
+                return 1;
+            }
+            std::vector<ClipRef> refs;
+            for (uint32_t k : node->clipObjects)
+                for (const ClipRef& b : set.clips[k].blocks) refs.push_back(b);
+            const size_t pick = size_t(atoi(argv[7]));
+            if (pick >= refs.size()) {
+                fprintf(stderr, "the animation has %zu clip blocks\n", refs.size());
+                return 1;
+            }
+            const AnimClip clip = readClipAt(p, refs[pick].block);
+            const Skeleton skel = skeletonForClips(p, clip.joints, variant->offset);
+            if (!skel.jointCount) {
+                fprintf(stderr, "no joint hierarchy with %u animated joints\n", clip.joints);
+                return 1;
+            }
+            std::vector<float> pose = skel.restPose;
+            clip.evaluate(float(atof(argv[8])), pose);
+            const auto legs = findLegChains(skel, names);
+            const auto world = poseToWorldWithLegs(skel, pose, poseToWorld(skel, skel.restPose), legs);
+            std::vector<CharacterModel::Part> parts;
+            for (PackedMesh& m : variantMeshes(p, readPackedMeshes(p), *variant, skel.offset)) {
+                CharacterModel::Part part;
+                if (m.materialOffset)
+                    for (const auto& [slot, oid] : readMaterialTextures(p, m.materialOffset))
+                        if (slot == 0) part.textureOid = oid;
+                part.mesh = std::move(m);
+                if (part.mesh.rigid) part.attachJoint = findJoint(skel, names, "hold_object_right_palm");
+                parts.push_back(std::move(part));
+            }
+            {
+                const auto index = textureIndex(p);
+                size_t withMap = 0, inPack = 0;
+                for (const auto& part : parts) {
+                    withMap += part.textureOid != 0;
+                    inPack += part.textureOid != 0 && index.count(part.textureOid) != 0;
+                }
+                printf("%zu of %zu meshes name a colour map, %zu of those are in this pack\n", withMap, parts.size(), inPack);
+            }
+            const float zero[3] = {0, 0, 0};
+            const size_t count = parts.size();
+            const CharacterModel model(std::move(parts), skel, zero);
+            std::vector<float> v = model.scene().vertices;
+            model.skin(world, v);
+            FILE* obj = fopen(argv[9], "w");
+            if (!obj) return 1;
+            for (size_t i = 0; i + 7 < v.size(); i += 8) fprintf(obj, "v %.3f %.3f %.3f\n", v[i], v[i + 1], v[i + 2]);
+            const auto& ix = model.scene().indices;
+            for (size_t i = 0; i + 2 < ix.size(); i += 3) fprintf(obj, "f %u %u %u\n", ix[i] + 1, ix[i + 1] + 1, ix[i + 2] + 1);
+            fclose(obj);
+            printf("%zu meshes, %zu triangles, hierarchy at 0x%x (%u joints, %u animated), %zu leg chains, clip 0x%x %u frames\n", count, model.triangles(),
+                   skel.offset, skel.jointCount, skel.animatedJoints, legs.size(), clip.offset, clip.frames);
+            return 0;
+        }
+        if (cmd == "anims" && argc >= 5) {
+            // ina_tool anims <archive> <pack> <oid_manifest.txt> [name filter]: named animations and their clip blocks
+            const int idx = arc.find(argv[3]);
+            if (idx < 0) {
+                fprintf(stderr, "no pack named %s\n", argv[3]);
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            const auto names = loadNames(argv[4]);
+            const AnimSet set = readAnimSet(p, names);
+            size_t blocks = 0;
+            for (const auto& c : set.clips) blocks += c.blocks.size();
+            printf("%zu animation nodes, %zu clip objects holding %zu clip blocks, %zu joint hierarchies\n", set.nodes.size(), set.clips.size(), blocks,
+                   findSkeletons(p).size());
+            for (const AnimNode& n : set.nodes) {
+                const std::string nm = names[n.nameOid];
+                if (argc > 5 && nm.find(argv[5]) == std::string::npos) continue;
+                printf("%s (class 0x%x)\n", nm.c_str(), n.classId);
+                for (uint32_t k : n.clipObjects) {
+                    const ClipObject& c = set.clips[k];
+                    printf("    %-28s", c.nameOid < names.size() ? names[c.nameOid].c_str() : "?");
+                    for (const ClipRef& b : c.blocks) {
+                        float m[3];
+                        if (clipRootMotion(p, b.block, m)) printf(" 0x%x %.2fs (moves %.0f %.0f %.0f)", b.block, b.duration, m[0], m[1], m[2]);
+                        else printf(" 0x%x %.2fs", b.block, b.duration);
+                    }
+                    printf("\n");
+                }
+            }
+            return 0;
+        }
         if (cmd == "clips" && argc >= 4) {
             // ina_tool clips <archive> <pack> [oid_manifest.txt] [clip number] [frame] [out.obj]: the animation
             // clips of a pack; with a clip number, where that clip puts each joint at a frame, and the pack's
@@ -360,6 +466,7 @@ int main(int argc, char** argv) {
                     if (variants.empty() ? m.optional : !variantShows(variants[0], m)) continue;
                     CharacterModel::Part part;
                     part.mesh = std::move(m);
+                    if (part.mesh.rigid) part.attachJoint = findJoint(skel, names, "hold_object_right_palm");
                     parts.push_back(std::move(part));
                 }
                 const float zero[3] = {0, 0, 0};

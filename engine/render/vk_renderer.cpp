@@ -715,6 +715,15 @@ bool VkRenderer::updateChunkVertices(uint32_t id, const std::vector<float>& vert
     return true;
 }
 
+void VkRenderer::setChunkBox(uint32_t id, const float boxMin[3], const float boxMax[3]) {
+    auto it = chunks_.find(id);
+    if (it == chunks_.end()) return;
+    for (int k = 0; k < 3; k++) {
+        it->second.boxMin[k] = boxMin[k];
+        it->second.boxMax[k] = boxMax[k];
+    }
+}
+
 void VkRenderer::removeChunk(uint32_t id) {
     auto it = chunks_.find(id);
     if (it == chunks_.end()) return;

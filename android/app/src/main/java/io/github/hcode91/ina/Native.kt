@@ -26,6 +26,18 @@ object Native {
     /** Steps the clip the character plays by [delta]. Returns a description of the clip. */
     @JvmStatic external fun clip(delta: Int): String
 
+    /** Shows the title view: the city around the opening checkpoint. Returns "OK…" or an error. */
+    @JvmStatic external fun title(): String
+
+    /** The game's logo: width and height (4 bytes each, little-endian) then RGBA rows; empty when missing. */
+    @JvmStatic external fun titleLogo(): ByteArray
+
+    /** Starts play with the player character. Returns "OK…" or "ERROR…". */
+    @JvmStatic external fun startGame(): String
+
+    /** The movement stick: x right, y forward, each -1..1. */
+    @JvmStatic external fun stick(x: Float, y: Float)
+
     /** Moves the world camera over the ground by a fraction of the screen (right and up positive). */
     @JvmStatic external fun pan(dx: Float, dy: Float)
 

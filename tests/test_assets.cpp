@@ -1,4 +1,6 @@
 // Unit tests with synthetic data only: no game files are needed or used.
+#include "anim/anim_set.h"
+#include "anim/character_loader.h"
 #include "anim/character_model.h"
 #include "anim/clip.h"
 #include "anim/leg_ik.h"
@@ -693,6 +695,51 @@ int main() {
         std::vector<float> v = model.scene().vertices;
         model.skin(w, v);
         CHECK(std::fabs(v[0] - (1000 - 5 + 20)) < 1e-2f && std::fabs(v[2] - 30) < 1e-2f && std::fabs(v[8] - (1000 - 4 + 20)) < 1e-2f);
+    }
+
+    // Named animations: a node points at a list, the list at an object table slot, the slot at a clip
+    // object, and a pointer after the clip object's masks at a clip block. Two merged files.
+    {
+        std::vector<uint8_t> r0(0x300, 0);
+        auto p32 = [&](size_t o, uint32_t v) { r0[o] = uint8_t(v >> 24); r0[o + 1] = uint8_t(v >> 16); r0[o + 2] = uint8_t(v >> 8); r0[o + 3] = uint8_t(v); };
+        p32(0x00, 0x228); p32(0x0C, 3);                    // file object "first"
+        p32(0x40, 0x1EC); p32(0x4C, 1);                    // node "anim_test"
+        p32(0x70, 0x100);                                  // -> list
+        p32(0x100, 0x110);                                 // list -> slot
+        p32(0x110, 0x140);                                 // slot -> clip object
+        p32(0x140, 0x229); p32(0x14C, 2);                  // clip object "standing"
+        p32(0x174, 0x1C0);                                 // its masks
+        p32(0x1E0, 0x200);                                 // record: -> clip block, duration
+        const float two = 2.0f;
+        uint32_t bits;
+        memcpy(&bits, &two, 4);
+        p32(0x1E4, bits);
+        r0[0x200] = 'C'; r0[0x201] = 'D'; r0[0x202] = 1; r0[0x203] = 7;
+        p32(0x208, 0x60);
+        p32(0x218, 0x30);                                  // root transform at +0x30: translation x = 2.0
+        p32(0x230 + 0x20, bits);
+        p32(0x280, 0x228); p32(0x28C, 4);                  // file object "second"
+        auto w = [](uint32_t off) { return uint16_t(off / 4); };
+        std::vector<uint8_t> dir;
+        be32(dir, 4); be32(dir, 4); be32(dir, 0x00); be32(dir, 0x40); be32(dir, 0x140); be32(dir, 0x280);
+        const std::vector<uint8_t> file =
+            makePackFromSegments({{1, 0x10, r0}, {6, 4, dir}, {2, 4, makeFixups({0xC000, w(0x70), w(0x100), w(0x110), w(0x174), w(0x1E0)})}});
+        Pack p(file);
+        const std::vector<std::string> names = {"", "anim_test", "standing", "first", "second"};
+        const AnimSet set = readAnimSet(p, names);
+        CHECK(set.clips.size() == 1 && set.nodes.size() == 1);
+        const AnimNode* node = set.find(names, "anim_test");
+        CHECK(node && node->clipObjects.size() == 1 && node->classId == 0x1EC);
+        if (set.clips.size() == 1) {
+            CHECK(set.clips[0].nameOid == 2 && set.clips[0].blocks.size() == 1);
+            if (set.clips[0].blocks.size() == 1) CHECK(set.clips[0].blocks[0].block == 0x200 && set.clips[0].blocks[0].duration == 2.0f);
+        }
+        float m[3] = {0, 0, 0};
+        CHECK(clipRootMotion(p, 0x200, m) && m[0] == 2.0f && m[1] == 0.0f);
+        CHECK(!set.find(names, "anim_other"));
+        const auto range = subFileRange(p, 0x140);
+        CHECK(range.first == 0 && range.second == 0x280);
+        CHECK(subFileRange(p, 0x290).first == 0x280);
     }
     (void)bef;
     printf(failures ? "%d FAILED\n" : "all tests passed\n", failures);

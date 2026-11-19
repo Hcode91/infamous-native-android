@@ -16,6 +16,8 @@ add_library(ina_core STATIC
     engine/assets/collision.cpp
     engine/assets/character_mesh.cpp
     engine/anim/clip.cpp
+    engine/anim/anim_set.cpp
+    engine/anim/character_loader.cpp
     engine/anim/leg_ik.cpp
     engine/anim/character_model.cpp
     engine/world/scene.cpp

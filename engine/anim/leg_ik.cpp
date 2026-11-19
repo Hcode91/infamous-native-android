@@ -84,6 +84,12 @@ void aim(const float* rest, V3 bone0, V3 pole0, V3 bone1, V3 pole1, V3 at, float
 
 }  // namespace
 
+int findJoint(const Skeleton& s, const std::vector<std::string>& names, const char* name) {
+    for (size_t i = 0; i < s.nameOids.size() && i < s.jointCount; i++)
+        if (s.nameOids[i] < names.size() && names[s.nameOids[i]] == name) return int(i);
+    return -1;
+}
+
 std::vector<LegChain> findLegChains(const Skeleton& s, const std::vector<std::string>& names) {
     auto find = [&](const char* name) {
         for (size_t i = 0; i < s.nameOids.size() && i < s.jointCount; i++)

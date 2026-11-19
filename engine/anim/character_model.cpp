@@ -31,7 +31,8 @@ CharacterModel::CharacterModel(std::vector<Part> parts, Skeleton skeleton, const
             for (uint32_t i : {a, b, c})
                 for (int k = 0; k < 3; k++) normals[i * 3 + size_t(k)] += nrm[k];
         }
-        const bool skinned = m.joints.size() >= nv * 4 && m.weights.size() >= nv * 4;
+        const bool carried = m.rigid && p.attachJoint >= 0;
+        const bool skinned = !carried && m.joints.size() >= nv * 4 && m.weights.size() >= nv * 4;
         for (size_t v = 0; v < nv; v++) {
             float* nr = &normals[v * 3];
             const float len = std::sqrt(nr[0] * nr[0] + nr[1] * nr[1] + nr[2] * nr[2]);
@@ -41,9 +42,10 @@ CharacterModel::CharacterModel(std::vector<Part> parts, Skeleton skeleton, const
                 bindNormals_.push_back(nr[k]);
             }
             for (int k = 0; k < 4; k++) {
-                joints_.push_back(skinned ? m.joints[v * 4 + size_t(k)] : uint16_t(0xffff));
-                weights_.push_back(skinned ? m.weights[v * 4 + size_t(k)] : 0.0f);
+                joints_.push_back(carried ? uint16_t(k == 0 ? p.attachJoint : 0xffff) : skinned ? m.joints[v * 4 + size_t(k)] : uint16_t(0xffff));
+                weights_.push_back(carried ? (k == 0 ? 1.0f : 0.0f) : skinned ? m.weights[v * 4 + size_t(k)] : 0.0f);
             }
+            carried_.push_back(carried ? 1 : 0);
             const float x = m.positions[v * 3] + offset_[0], y = m.positions[v * 3 + 1] + offset_[1], z = m.positions[v * 3 + 2] + offset_[2];
             const float uvx = v * 2 + 1 < m.uvs.size() ? m.uvs[v * 2] : 0.0f, uvy = v * 2 + 1 < m.uvs.size() ? m.uvs[v * 2 + 1] : 0.0f;
             scene_.vertices.insert(scene_.vertices.end(), {x, y, z, nr[0], nr[1], nr[2], uvx, uvy});
@@ -79,7 +81,7 @@ CharacterModel::CharacterModel(std::vector<Part> parts, Skeleton skeleton, const
     }
 }
 
-void CharacterModel::skin(const std::vector<float>& world, std::vector<float>& vertices) const {
+void CharacterModel::skin(const std::vector<float>& world, std::vector<float>& vertices, const float* root) const {
     const size_t n = skeleton_.jointCount, nv = bindPositions_.size() / 3;
     if (world.size() < n * 12 || vertices.size() < nv * 8 || skeleton_.inverseBind.size() < n * 12) return;
     std::vector<float> m(n * 12);   // world * inverse bind
@@ -98,7 +100,7 @@ void CharacterModel::skin(const std::vector<float>& world, std::vector<float>& v
             const float wt = weights_[v * 4 + size_t(k)];
             const size_t j = joints_[v * 4 + size_t(k)];
             if (wt <= 0 || j >= n) continue;
-            const float* s = &m[j * 12];
+            const float* s = carried_[v] ? &world[j * 12] : &m[j * 12];
             for (int row = 0; row < 3; row++) {
                 pos[row] += wt * (s[row * 4] * p[0] + s[row * 4 + 1] * p[1] + s[row * 4 + 2] * p[2] + s[row * 4 + 3]);
                 nrm[row] += wt * (s[row * 4] * nr[0] + s[row * 4 + 1] * nr[1] + s[row * 4 + 2] * nr[2]);
@@ -107,13 +109,25 @@ void CharacterModel::skin(const std::vector<float>& world, std::vector<float>& v
         }
         float* out = &vertices[v * 8];
         if (total <= 0) {   // unskinned vertex: leave it in the bind pose
-            for (int k = 0; k < 3; k++) { out[k] = p[k] + offset_[k]; out[3 + k] = nr[k]; }
+            for (int k = 0; k < 3; k++) {
+                out[k] = root ? root[k * 4] * p[0] + root[k * 4 + 1] * p[1] + root[k * 4 + 2] * p[2] + root[k * 4 + 3] : p[k] + offset_[k];
+                out[3 + k] = root ? root[k * 4] * nr[0] + root[k * 4 + 1] * nr[1] + root[k * 4 + 2] * nr[2] : nr[k];
+            }
             continue;
         }
         const float len = std::sqrt(nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]);
         for (int k = 0; k < 3; k++) {
-            out[k] = pos[k] / total + offset_[k];
-            out[3 + k] = len > 1e-12f ? nrm[k] / len : nr[k];
+            pos[k] /= total;
+            nrm[k] = len > 1e-12f ? nrm[k] / len : nr[k];
+        }
+        for (int k = 0; k < 3; k++) {
+            if (root) {
+                out[k] = root[k * 4] * pos[0] + root[k * 4 + 1] * pos[1] + root[k * 4 + 2] * pos[2] + root[k * 4 + 3];
+                out[3 + k] = root[k * 4] * nrm[0] + root[k * 4 + 1] * nrm[1] + root[k * 4 + 2] * nrm[2];
+            } else {
+                out[k] = pos[k] + offset_[k];
+                out[3 + k] = nrm[k];
+            }
         }
     }
 }

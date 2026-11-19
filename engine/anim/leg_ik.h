@@ -19,6 +19,9 @@ struct LegChain {
 // Finds the two leg chains by joint name; empty when the skeleton does not have them.
 std::vector<LegChain> findLegChains(const Skeleton& skeleton, const std::vector<std::string>& names);
 
+// A joint by name, or -1.
+int findJoint(const Skeleton& skeleton, const std::vector<std::string>& names, const char* name);
+
 // World matrices (12 floats per joint) of `localPose`, with the legs solved towards their targets.
 // `restWorld` is poseToWorld of the rest pose. With no chains this is poseToWorld.
 std::vector<float> poseToWorldWithLegs(const Skeleton& skeleton, const std::vector<float>& localPose,

@@ -62,7 +62,10 @@ void appendSkin(const Pack& pack, size_t rec, uint32_t vertices, PackedMesh& m) 
         m.weights.resize(before + size_t(vertices) * 4, 0.0f);
         for (size_t v = 0; v < vertices; v++) m.weights[before + v * 4] = 1.0f;
     };
-    if (!pack.isPointer(rec + 0x3C) || !pack.isPointer(rec + 0x50)) return fail();
+    if (!pack.isPointer(rec + 0x3C) || !pack.isPointer(rec + 0x50)) {
+        m.rigid = true;
+        return fail();
+    }
     const uint32_t nControl = u16(data, rec + 0x30), nUniform = u16(data, rec + 0x32) / 2u, nPer = u16(data, rec + 0x34) / 2u;
     const uint32_t nWeights = u16(data, rec + 0x36), nRuns = u16(data, rec + 0x38);
     const uint32_t control = pack.word(rec + 0x3C), uniform = pack.word(rec + 0x40), per = pack.word(rec + 0x44);
@@ -263,14 +266,20 @@ std::vector<CharacterVariant> readCharacterVariants(const Pack& pack, uint32_t v
     std::vector<CharacterVariant> out;
     const auto data = pack.data();
     for (uint32_t obj : pack.objects()) {
-        if (size_t(obj) + 0x40 > data.size() || pack.word(obj) != variantClass || !pack.isPointer(size_t(obj) + 0x38)) continue;
-        const uint32_t entry = pack.word(size_t(obj) + 0x38);
-        if (size_t(entry) + 16 > data.size() || !pack.isPointer(size_t(entry) + 8)) continue;
-        const uint32_t slot = pack.word(size_t(entry) + 8);
-        if (size_t(slot) + 4 > data.size() || !pack.isPointer(slot)) continue;
+        if (size_t(obj) + 0x40 > data.size() || pack.word(obj) != variantClass) continue;
         CharacterVariant v;
+        v.offset = uint32_t(obj);
         v.nameOid = pack.word(size_t(obj) + 12);
-        for (size_t at = pack.word(slot); at + 28 <= data.size() && at < size_t(pack.word(slot)) + 0x8000; at += 4) {
+        // A variant without a property list (the player's) shows only the meshes that are not optional.
+        uint32_t list = 0;
+        if (pack.isPointer(size_t(obj) + 0x38)) {
+            const uint32_t entry = pack.word(size_t(obj) + 0x38);
+            if (size_t(entry) + 16 <= data.size() && pack.isPointer(size_t(entry) + 8)) {
+                const uint32_t slot = pack.word(size_t(entry) + 8);
+                if (size_t(slot) + 4 <= data.size() && pack.isPointer(slot)) list = pack.word(slot);
+            }
+        }
+        for (size_t at = list; list && at + 28 <= data.size() && at < size_t(list) + 0x8000; at += 4) {
             const uint32_t w = pack.word(at);
             if (w == 0xB1000000u) break;
             if (w == 0x34040000u) v.names.push_back(pack.word(at + 24));
@@ -283,29 +292,44 @@ std::vector<CharacterVariant> readCharacterVariants(const Pack& pack, uint32_t v
 // Joint hierarchy block: magic "JH", u16 version 0x010A, ..., u16 joint count at +0x0C; offsets from the
 // block at +0x28 (16 bytes a joint: flags, parent, first child, next sibling), +0x2C (rest pose, 48 bytes a
 // joint), +0x38 (names, as object ids; the first three are not joints) and +0x44 (inverse bind matrices).
-Skeleton readSkeleton(const Pack& pack) {
+Skeleton readSkeletonAt(const Pack& pack, uint32_t offset) {
     Skeleton s;
     const auto data = pack.data();
-    for (size_t at = 0; at + 0x50 <= data.size(); at += 16) {
-        if (data[at] != 'J' || data[at + 1] != 'H' || data[at + 2] != 1 || data[at + 3] != 0x0A) continue;
-        const uint32_t n = u16(data, at + 0x0C), names = pack.word(at + 0x38), binds = pack.word(at + 0x44);
-        const uint32_t links = pack.word(at + 0x28), pose = pack.word(at + 0x2C);
-        if (n == 0 || n > 1024 || at + binds + size_t(n) * 48 > data.size() || at + names + (size_t(n) + 3) * 4 > data.size() ||
-            at + links + size_t(n) * 16 > data.size() || at + pose + size_t(n) * 48 > data.size())
-            continue;
-        s.offset = uint32_t(at);
-        s.jointCount = n;
-        for (uint32_t i = 0; i < n * 12; i++) s.inverseBind.push_back(f32(pack, at + binds + size_t(i) * 4));
-        for (uint32_t i = 0; i < n; i++) s.nameOids.push_back(pack.word(at + names + (size_t(i) + 3) * 4));
-        for (uint32_t i = 0; i < n * 12; i++) s.restPose.push_back(f32(pack, at + pose + size_t(i) * 4));
-        for (uint32_t i = 0; i < n; i++) {
-            s.flags.push_back(pack.word(at + links + size_t(i) * 16));
-            const int32_t parent = int32_t(pack.word(at + links + size_t(i) * 16 + 4));
-            s.parents.push_back(parent >= 0 && uint32_t(parent) < n && uint32_t(parent) != i ? parent : -1);
-        }
-        break;
+    const size_t at = offset;
+    if (at + 0x50 > data.size() || data[at] != 'J' || data[at + 1] != 'H' || data[at + 2] != 1 || data[at + 3] != 0x0A) return s;
+    const uint32_t n = u16(data, at + 0x0C), names = pack.word(at + 0x38), binds = pack.word(at + 0x44);
+    const uint32_t links = pack.word(at + 0x28), pose = pack.word(at + 0x2C);
+    if (n == 0 || n > 1024 || at + binds + size_t(n) * 48 > data.size() || at + names + (size_t(n) + 3) * 4 > data.size() ||
+        at + links + size_t(n) * 16 > data.size() || at + pose + size_t(n) * 48 > data.size())
+        return s;
+    s.offset = uint32_t(at);
+    s.jointCount = n;
+    s.animatedJoints = std::min<uint32_t>(u16(data, at + 4), n);
+    for (uint32_t i = 0; i < n * 12; i++) s.inverseBind.push_back(f32(pack, at + binds + size_t(i) * 4));
+    for (uint32_t i = 0; i < n; i++) s.nameOids.push_back(pack.word(at + names + (size_t(i) + 3) * 4));
+    for (uint32_t i = 0; i < n * 12; i++) s.restPose.push_back(f32(pack, at + pose + size_t(i) * 4));
+    for (uint32_t i = 0; i < n; i++) {
+        s.flags.push_back(pack.word(at + links + size_t(i) * 16));
+        const int32_t parent = int32_t(pack.word(at + links + size_t(i) * 16 + 4));
+        s.parents.push_back(parent >= 0 && uint32_t(parent) < n && uint32_t(parent) != i ? parent : -1);
     }
     return s;
+}
+
+std::vector<uint32_t> findSkeletons(const Pack& pack) {
+    std::vector<uint32_t> out;
+    const auto data = pack.data();
+    for (size_t at = 0; at + 0x50 <= data.size(); at += 16)
+        if (data[at] == 'J' && data[at + 1] == 'H' && data[at + 2] == 1 && data[at + 3] == 0x0A) out.push_back(uint32_t(at));
+    return out;
+}
+
+Skeleton readSkeleton(const Pack& pack) {
+    for (uint32_t at : findSkeletons(pack)) {
+        Skeleton s = readSkeletonAt(pack, at);
+        if (s.jointCount) return s;
+    }
+    return {};
 }
 
 std::vector<float> poseToWorld(const Skeleton& s, const std::vector<float>& pose) {
@@ -380,6 +404,17 @@ std::vector<float> skinPositions(const PackedMesh& mesh, const Skeleton& s, cons
 bool variantShows(const CharacterVariant& variant, const PackedMesh& mesh) {
     if (!mesh.optional) return true;
     return std::find(variant.names.begin(), variant.names.end(), mesh.nameOid) != variant.names.end();
+}
+
+std::pair<uint32_t, uint32_t> subFileRange(const Pack& pack, uint32_t offset, uint32_t fileClass) {
+    const auto data = pack.data();
+    uint32_t first = 0, second = uint32_t(data.size());
+    for (uint32_t o : pack.objects()) {
+        if (size_t(o) + 4 > data.size() || pack.word(o) != fileClass) continue;
+        if (o <= offset && o >= first) first = o;
+        if (o > offset && o < second) second = o;
+    }
+    return {first, second};
 }
 
 }  // namespace ina

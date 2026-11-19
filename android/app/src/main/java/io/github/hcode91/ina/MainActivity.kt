@@ -2,7 +2,10 @@ package io.github.hcode91.ina
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -18,14 +21,17 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.io.File
+import java.nio.ByteBuffer
 import kotlin.concurrent.thread
 
 /**
- * Development shell. Imports the user's own game files once (copied into app storage), then shows the
- * game's textures decoded by the native engine. No game data ships with the app.
+ * Imports the user's own game files once (copied into app storage), then shows a title view of the city
+ * with the game's logo and, on a tap, the player character under stick control. A development viewer
+ * (textures, sectors, characters) sits behind the Viewer button. No game data ships with the app.
  */
 class MainActivity : Activity(), SurfaceHolder.Callback {
     private val wanted = listOf("infamous1.psarc_s", "infamous2.psarc_s", "oid_manifest.txt")
@@ -43,6 +49,30 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var personButton: Button
     private lateinit var moveButton: Button
     private var personNote = ""
+    private var gameMode = false          // title view or play: the viewer controls are hidden
+    private var playing = false           // the player character is under stick control
+    private lateinit var titleLayer: LinearLayout
+    private lateinit var titleNote: TextView
+    private lateinit var logoView: ImageView
+    private lateinit var gameBar: LinearLayout
+    private lateinit var stickView: StickView
+    private var stickId = -1              // pointer ids of the finger on the stick and the one turning the camera
+    private var lookId = -1
+    private var stickX0 = 0f
+    private var stickY0 = 0f
+
+    /** Draws the movement stick where the left thumb went down. */
+    private class StickView(c: android.content.Context) : View(c) {
+        var cx = 0f; var cy = 0f; var dx = 0f; var dy = 0f; var shown = false
+        private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 4f; color = Color.argb(140, 255, 255, 255) }
+        private val knob = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(120, 255, 255, 255) }
+        var radius = 120f
+        override fun onDraw(canvas: Canvas) {
+            if (!shown) return
+            canvas.drawCircle(cx, cy, radius, ring)
+            canvas.drawCircle(cx + dx * radius, cy + dy * radius, radius * 0.4f, knob)
+        }
+    }
     private var lastX = 0f
     private var lastY = 0f
     private var midX = 0f
@@ -81,6 +111,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             }
         })
         surface.setOnTouchListener { v, e ->
+            if (playing) { gameTouch(v, e); return@setOnTouchListener true }
+            if (gameMode) return@setOnTouchListener true
             pinch.onTouchEvent(e)
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> { lastX = e.x; lastY = e.y }
@@ -173,8 +205,47 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             }
         }
         controls.addView(moveButton)
+        controls.addView(Button(this).apply {
+            text = "Game"
+            setOnClickListener { if (opened) showTitle() }
+        })
         controls.visibility = View.GONE
         root.addView(controls, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+
+        // Title view: the game's logo over the city, a tap starts play.
+        stickView = StickView(this)
+        stickView.radius = 60f * resources.displayMetrics.density
+        root.addView(stickView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        logoView = ImageView(this).apply { adjustViewBounds = true }
+        titleNote = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 20f
+            gravity = Gravity.CENTER
+            setShadowLayer(6f, 0f, 0f, Color.BLACK)
+            setPadding(0, 24, 0, 24)
+        }
+        titleLayer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            addView(logoView, LinearLayout.LayoutParams((resources.displayMetrics.widthPixels * 0.6f).toInt(), WRAP_CONTENT))
+            addView(titleNote, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            setOnClickListener { startPlay() }
+        }
+        root.addView(titleLayer, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        gameBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            visibility = View.GONE
+            addView(Button(this@MainActivity).apply {
+                text = "Title"
+                setOnClickListener { showTitle() }
+            })
+            addView(Button(this@MainActivity).apply {
+                text = "Viewer"
+                setOnClickListener { showViewer() }
+            })
+        }
+        root.addView(gameBar, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.END))
 
         importButton = Button(this).apply {
             text = "Choose game folder"
@@ -190,16 +261,127 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             override fun run() {
                 if (opened) {
                     stats.text = Native.status()
-                    if (worldMode) Native.worldStatus().let { if (it.isNotEmpty()) info.text = if (personNote.isEmpty()) it else it + "\n" + personNote }
+                    if (gameMode) info.text = Native.worldStatus()
+                    else if (worldMode) Native.worldStatus().let { if (it.isNotEmpty()) info.text = if (personNote.isEmpty()) it else it + "\n" + personNote }
                 }
                 ui.postDelayed(this, 500)
             }
         })
     }
 
+    /** The title view: the city turning slowly behind the game's logo. */
+    private fun showTitle() {
+        gameMode = true
+        playing = false
+        worldMode = false
+        cityMode = false
+        Native.stick(0f, 0f)
+        stickView.shown = false
+        stickView.invalidate()
+        controls.visibility = View.GONE
+        gameBar.visibility = View.VISIBLE
+        titleLayer.visibility = View.VISIBLE
+        titleNote.text = "Loading…"
+        thread {
+            val result = Native.title()
+            val logo = Native.titleLogo()
+            ui.post {
+                if (logo.size > 8) {
+                    val b = ByteBuffer.wrap(logo).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    val w = b.getInt(0); val h = b.getInt(4)
+                    if (w > 0 && h > 0 && logo.size >= 8 + w * h * 4) {
+                        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                        bmp.copyPixelsFromBuffer(ByteBuffer.wrap(logo, 8, w * h * 4))
+                        logoView.setImageBitmap(bmp)
+                    }
+                }
+                titleNote.text = if (result.startsWith("OK")) "Tap to start" else result
+            }
+        }
+    }
+
+    private fun startPlay() {
+        if (!gameMode || playing || titleNote.text.toString() != "Tap to start") return
+        titleNote.text = "Starting…"
+        thread {
+            val result = Native.startGame()
+            ui.post {
+                if (result.startsWith("OK")) {
+                    playing = true
+                    stickId = -1; lookId = -1
+                    titleLayer.visibility = View.GONE
+                } else {
+                    titleNote.text = result
+                }
+            }
+        }
+    }
+
+    /** The development viewer: textures, sectors and characters. */
+    private fun showViewer() {
+        gameMode = false
+        playing = false
+        Native.stick(0f, 0f)
+        stickView.shown = false
+        stickView.invalidate()
+        titleLayer.visibility = View.GONE
+        gameBar.visibility = View.GONE
+        controls.visibility = View.VISIBLE
+        worldMode = false
+        modeButton.text = "World"
+        cityButton.visibility = View.GONE
+        personButton.visibility = View.GONE
+        moveButton.visibility = View.GONE
+        Native.hideWorld()
+        step(0, 0)
+    }
+
+    /** Play controls: a finger that lands on the left half is the movement stick, any other turns the camera. */
+    private fun gameTouch(v: View, e: MotionEvent) {
+        val i = e.actionIndex
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                val id = e.getPointerId(i)
+                if (e.getX(i) < v.width / 2f && stickId < 0) {
+                    stickId = id; stickX0 = e.getX(i); stickY0 = e.getY(i)
+                    stickView.cx = stickX0; stickView.cy = stickY0; stickView.dx = 0f; stickView.dy = 0f; stickView.shown = true
+                } else if (lookId < 0) {
+                    lookId = id; lastX = e.getX(i); lastY = e.getY(i)
+                }
+            }
+            MotionEvent.ACTION_MOVE -> for (k in 0 until e.pointerCount) {
+                val id = e.getPointerId(k)
+                if (id == stickId) {
+                    var dx = (e.getX(k) - stickX0) / stickView.radius
+                    var dy = (e.getY(k) - stickY0) / stickView.radius
+                    val len = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
+                    if (len > 1f) { dx /= len; dy /= len }
+                    stickView.dx = dx; stickView.dy = dy
+                    Native.stick(dx, -dy)
+                } else if (id == lookId) {
+                    Native.camera(-(e.getX(k) - lastX) * 0.006f, (e.getY(k) - lastY) * 0.006f, 1f)
+                    lastX = e.getX(k); lastY = e.getY(k)
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
+                val id = e.getPointerId(i)
+                if (id == stickId || e.actionMasked != MotionEvent.ACTION_POINTER_UP) {
+                    stickId = -1; stickView.shown = false
+                    Native.stick(0f, 0f)
+                }
+                if (id == lookId || e.actionMasked != MotionEvent.ACTION_POINTER_UP) lookId = -1
+                if (e.actionMasked == MotionEvent.ACTION_UP) v.performClick()
+            }
+        }
+        stickView.invalidate()
+    }
+
     private fun showNeedsImport() {
         importButton.visibility = View.VISIBLE
         controls.visibility = View.GONE
+        titleLayer.visibility = View.GONE
+        gameBar.visibility = View.GONE
+        gameMode = false
         info.text = "No game data yet.\nChoose the folder that holds your own copy of the game (the one containing " +
             "PS3_GAME, or any folder above the two infamous*.psarc_s files). The files are copied into this app once."
     }
@@ -294,8 +476,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 if (result.startsWith("OK")) {
                     opened = true
                     importButton.visibility = View.GONE
-                    controls.visibility = View.VISIBLE
-                    step(0, 0)
+                    showTitle()
                 } else {
                     showNeedsImport()
                     info.text = "The imported files could not be opened: $result\nChoose the game folder again to re-import."
