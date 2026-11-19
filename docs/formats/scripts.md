@@ -79,7 +79,7 @@ type). Pushing a constant first aligns the stack to the constant's alignment.
 | 1D | 2 | function entry: new scope of `b2b3` bytes under the current one, new stack frame |
 | 1E / 1F | 1 / 0 | open / close a nested scope |
 | 22 | | value bookkeeping (reference counts in the original); pops `b1` |
-| 23, 26, 2A, 2C / 24, 25, 2B, 2D | 3 (2x: 4) | set / get a property: object pointer and value sit in the top `b1` bytes |
+| 23, 26, 2A, 2C / 24, 25, 2B, 2D | 3 (2x: 4) | set / get a property in the top `b1` bytes: a set has the object pointer then the value, a get has the value's slot then the object pointer |
 | 34-36 / 38, 39 | 1 (+1 zero) | engine method / engine function: result slot and arguments are the top `b1` bytes |
 | 37 | 2 (name, 0) | call a script method by name on the object at the top |
 | 3A / 3B / 3D | | pop / reserve / zero `b1` bytes |

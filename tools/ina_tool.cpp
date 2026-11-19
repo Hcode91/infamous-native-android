@@ -612,10 +612,54 @@ int main(int argc, char** argv) {
                 if (recent.size() > 6) recent.erase(recent.begin());
                 printf("%7.2f  %s\n", now, s.c_str());
             };
-            host.onMethod = [&](ScriptCall& c, const std::string&, const std::string& member) {
-                if (member != "JoyStickThunk.FIsButtonPressed") return false;
-                c.resultBool(now >= 12.0);   // stands in for the player pressing the button
-                return true;
+            // With INA_SIM set, the run also stands in for the camera (its clip's labels are delivered to OnLabel
+            // from the moment the script starts it) and for spawning, and prints what happens to spawned things.
+            const bool sim = getenv("INA_SIM") != nullptr;
+            double shotStart = -1;
+            std::vector<uint32_t> spawned;
+            auto isSpawned = [&](uint32_t h) { return std::find(spawned.begin(), spawned.end(), h) != spawned.end(); };
+            host.onMethod = [&](ScriptCall& c, const std::string& object, const std::string& member) {
+                if (member == "JoyStickThunk.FIsButtonPressed") {
+                    c.resultBool(now >= 12.0);   // stands in for the player pressing the button
+                    return true;
+                }
+                if (sim && member == "ProxySite.SPAWN") {
+                    spawned.push_back(vm.newHandle());
+                    c.resultWord(spawned.back());
+                    printf("%7.2f  SIM spawn at %s -> h%x\n", now, object.c_str(), spawned.back() & 0xFFFFF);
+                    return true;
+                }
+                if (sim && isSpawned(c.object)) {
+                    printf("%7.2f  SIM h%x %s(%s)\n", now, c.object & 0xFFFFF, member.c_str(), host.describe(vm, c.argWord(0)).c_str());
+                    return true;
+                }
+                return false;
+            };
+            host.onScriptMethod = [&](ScriptCall& c, const std::string& object, const std::string& member) {
+                if (!sim || object != "prxs_jb_intro_camera_1") return false;
+                if (member == "OnStart") { shotStart = now; printf("%7.2f  SIM camera starts\n", now); return true; }
+                if (member == "WaitForCamera") { c.thread->waitFor = [&] { return shotStart >= 0 && now >= shotStart + 15.0; }; c.thread->yielded = true; return true; }
+                return false;
+            };
+            host.onProperty = [&](ScriptCall& c, const std::string&, const std::string& member) {
+                if (sim && member.find("ROOT_OBJECT") != std::string::npos) printf("%7.2f  SIM %s %s on %s\n", now, c.isSet ? "set" : "get", member.c_str(), host.describe(vm, c.object).c_str());
+                if (!sim || !isSpawned(c.object)) return false;
+                if (!c.isSet && member.find("ROOT_OBJECT") != std::string::npos) {
+                    c.value[0] = uint8_t(c.object >> 24); c.value[1] = uint8_t(c.object >> 16); c.value[2] = uint8_t(c.object >> 8); c.value[3] = uint8_t(c.object);
+                    printf("%7.2f  SIM h%x root object asked\n", now, c.object & 0xFFFFF);
+                    return true;
+                }
+                float v[4] = {0, 0, 0, 0};
+                if (scriptTypeSize(c.type) == 16)
+                    for (int k = 0; k < 4; k++) { const uint32_t w = uint32_t(c.value[4 * k]) << 24 | uint32_t(c.value[4 * k + 1]) << 16 | uint32_t(c.value[4 * k + 2]) << 8 | c.value[4 * k + 3]; memcpy(&v[k], &w, 4); }
+                printf("%7.2f  SIM h%x %s %s (%g %g %g)\n", now, c.object & 0xFFFFF, c.isSet ? "set" : "get", member.c_str(), v[0], v[1], v[2]);
+                return c.isSet;
+            };
+            host.onFunction = [&](ScriptCall& c, const std::string& fn) {
+                if (!sim || fn != "VecMuzzle") return false;
+                printf("%7.2f  SIM VecMuzzle from %g %g %g to %g %g %g gravity z %g speed %g (%zu bytes)\n", now, c.argFloat(4), c.argFloat(5), c.argFloat(6),
+                       c.argFloat(8), c.argFloat(9), c.argFloat(10), c.argFloat(14), c.argFloat(16), c.args.size());
+                return false;
             };
             ScriptScope* self = vm.instance(size_t(cls));
             const uint32_t code = vm.findFunction(size_t(cls), fnOid);
@@ -629,7 +673,22 @@ int main(int argc, char** argv) {
                 vm.spawn(code, self);
             }
             const double end = argc > 6 ? atof(argv[6]) : 60.0;
-            for (; now < end && vm.liveThreads(); now += 1.0 / 30.0) vm.update(now, 1.0 / 30.0);
+            const std::pair<double, const char*> moments[6] = {{0.0, "BigPulse"}, {0.0889, "BigFlash"}, {0.1, "WindUp"}, {0.1222, "StartShaking"},
+                                                               {0.6311, "FirstCarLands"}, {0.6889, "MoreFlyingCars"}};
+            size_t nextMoment = 0;
+            uint32_t labelOid = 0;
+            for (uint32_t i = 0; i < names.size(); i++) if (names[i] == "OnLabel") labelOid = i;
+            for (; now < end && vm.liveThreads(); now += 1.0 / 30.0) {
+                while (sim && shotStart >= 0 && nextMoment < 6 && now >= shotStart + 15.0 * moments[nextMoment].first) {
+                    uint32_t arg = 0;
+                    for (uint32_t i = 0; i < names.size(); i++) if (names[i] == moments[nextMoment].second) arg = i;
+                    const uint8_t b4[4] = {uint8_t(arg >> 24), uint8_t(arg >> 16), uint8_t(arg >> 8), uint8_t(arg)};
+                    if (const uint32_t handler = vm.findFunction(size_t(cls), labelOid)) vm.call(handler, self, b4);
+                    printf("%7.2f  SIM label %s\n", now, moments[nextMoment].second);
+                    nextMoment++;
+                }
+                vm.update(now, 1.0 / 30.0);
+            }
             printf("%7.2f  end: %zu threads still running, %u instructions skipped as unknown, %u threads faulted (last at 0x%x)\n", now,
                    vm.liveThreads(), vm.unknownInstructions(), vm.faults(), vm.lastFault());
             return 0;

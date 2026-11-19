@@ -328,8 +328,8 @@ void ScriptMachine::step(ScriptThread& t) {
         case 0x1F: if (t.scope) t.scope = t.scope->parent; break;
         case 0x21: if (t.scope && t.scope->data.size() < size_t(b23) + 64) t.scope->data.resize(size_t(b23) + 64, 0); break;
         case 0x22: t.sp = sp - b1; break;
-        // Property set (23, 26, 2A, 2C) and get (24, 25, 2B, 2D): the object pointer and the value, aligned to
-        // its type, sit in the top b1 bytes. The 2x forms carry two more words than the others.
+        // Property set (23, 26, 2A, 2C) and get (24, 25, 2B, 2D) work on the top b1 bytes: a set has the object
+        // pointer and then the value, aligned to its type; a get has the value's slot and then the object pointer. The 2x forms carry two more words than the others.
         case 0x23: case 0x24: case 0x25: case 0x26: case 0x2A: case 0x2B: case 0x2C: case 0x2D: {
             next += op >= 0x2A ? 16 : 12;
             if (sp < uint32_t(b1) + 0x40) return fault();
@@ -337,10 +337,15 @@ void ScriptMachine::step(ScriptThread& t) {
             c.machine = this;
             c.thread = &t;
             const uint32_t base = sp - b1;
-            c.object = rd(M + base);
-            c.value = M + up(base + 4, scriptTypeAlign(b23));
             c.type = b23;
             c.isSet = op == 0x23 || op == 0x26 || op == 0x2A || op == 0x2C;
+            if (c.isSet) {   // object pointer first, then the value
+                c.object = rd(M + base);
+                c.value = M + up(base + 4, scriptTypeAlign(b23));
+            } else {         // the value's slot first (like a call's result), then the object pointer
+                c.value = M + base;
+                c.object = rd(M + base + up(std::max<uint32_t>(scriptTypeSize(b23), 1), 4));
+            }
             const auto it = image_.links.find(a);
             if (it != image_.links.end()) c.link = it->second;
             c.link.kind = ScriptLink::Property;
