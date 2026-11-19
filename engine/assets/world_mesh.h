@@ -72,6 +72,7 @@ private:
 // when `shared` holds them, and count as skipped otherwise.
 // `names` (the lines of oid_manifest.txt) lets the effect name pick the vertex layout and draw mode.
 std::vector<StaticMesh> readStaticMeshes(const Pack& pack, size_t* skipped = nullptr, const SharedGeometry* shared = nullptr,
-                                         const std::vector<std::string>* names = nullptr);
+                                         const std::vector<std::string>* names = nullptr, uint32_t first = 0, uint32_t end = 0xFFFFFFFFu);
+// `first` and `end` limit the search to mesh records in that range of the pack (one merged file).
 
 }  // namespace ina

@@ -179,7 +179,8 @@ int decodeMesh(const Pack& pack, size_t rec, const Pack& src, const uint32_t str
 
 SharedGeometry::SharedGeometry(const Pack& pack) : pack_(&pack), targets_(pointerTargets(pack)) {}
 
-std::vector<StaticMesh> readStaticMeshes(const Pack& pack, size_t* skipped, const SharedGeometry* shared, const std::vector<std::string>* names) {
+std::vector<StaticMesh> readStaticMeshes(const Pack& pack, size_t* skipped, const SharedGeometry* shared, const std::vector<std::string>* names,
+                                         uint32_t first, uint32_t end) {
     std::vector<StaticMesh> out;
     if (skipped) *skipped = 0;
     const auto data = pack.data();
@@ -190,6 +191,7 @@ std::vector<StaticMesh> readStaticMeshes(const Pack& pack, size_t* skipped, cons
     for (uint32_t at : pack.pointerOffsets()) {
         if (at < 0x34 || size_t(at) - 0x34 + 0x60 > data.size()) continue;
         const size_t rec = at - 0x34;
+        if (rec < first || rec >= end) continue;
         uint32_t f[24];
         for (int i = 0; i < 24; i++) f[i] = pack.word(rec + size_t(i) * 4);
         bool ok = pack.isPointer(rec + 8) && pack.isPointer(rec + 19 * 4) && pack.isPointer(rec + 20 * 4) && f[19] == f[20];
@@ -208,7 +210,7 @@ std::vector<StaticMesh> readStaticMeshes(const Pack& pack, size_t* skipped, cons
     }
     // Records that borrow their buffers: the fixup segment names them, with the hash to look up.
     for (const GeometryImport& im : pack.geometryImports()) {
-        if (size_t(im.recordOffset) + 0x60 > data.size()) continue;
+        if (size_t(im.recordOffset) + 0x60 > data.size() || im.recordOffset < first || im.recordOffset >= end) continue;
         const GeometryExport* e = shared ? shared->pack().findGeometry(im.hash) : nullptr;
         StaticMesh m;
         m.shared = true;

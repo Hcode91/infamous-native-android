@@ -6,6 +6,7 @@
 //   ina_tool city <archive holding EMPIRE.xpp> [out.obj] [oid_manifest.txt]             the far-away city and its hex cells
 //   ina_tool clips <archive> <pack> [oid_manifest.txt] [clip] [frame] [out.obj]         animation clips; one clip posed
 //   ina_tool anims <archive> <pack> <oid_manifest.txt> [name filter]                    named animations and their clips
+//   ina_tool file <archive> <pack> <oid_manifest.txt> <file name> [out.obj]             one merged file's model
 //   ina_tool files <archive> <pack> <oid_manifest.txt>                                  files merged into a pack, meshes in each
 //   ina_tool props <archive> <pack> <oid_manifest.txt> [name filter]                    objects' property sets
 //   ina_tool script <archive> <pack> <oid_manifest.txt> <function> [seconds]            run a script function, print its requests
@@ -19,6 +20,7 @@
 #include "assets/hex_map.h"
 #include "assets/pack.h"
 #include "script/property_set.h"
+#include "world/spawn.h"
 #include "script/script_host.h"
 #include "assets/psarc.h"
 #include "assets/texture.h"
@@ -400,6 +402,53 @@ int main(int argc, char** argv) {
             fclose(obj);
             printf("%zu meshes, %zu triangles, hierarchy at 0x%x (%u joints, %u animated), %zu leg chains, clip 0x%x %u frames\n", count, model.triangles(),
                    skel.offset, skel.jointCount, skel.animatedJoints, legs.size(), clip.offset, clip.frames);
+            return 0;
+        }
+        if (cmd == "file" && argc >= 6) {
+            // ina_tool file <archive> <pack> <oid_manifest.txt> <file name> [out.obj] [damage state]: one merged file's model
+            const int idx = arc.find(argv[3]);
+            if (idx < 0) {
+                fprintf(stderr, "no pack named %s\n", argv[3]);
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            const auto names = loadNames(argv[4]);
+            const uint32_t file = findProxyFile(p, names, argv[5]);
+            if (!file) {
+                fprintf(stderr, "no merged file named %s\n", argv[5]);
+                return 1;
+            }
+            const auto range = subFileRange(p, file, kProxyFileClass);
+            const auto meshes = readStaticMeshes(p, nullptr, nullptr, &names, range.first, range.second);
+            size_t pieces = 0;
+            const unsigned state = argc > 7 ? unsigned(atoi(argv[7])) : 0;
+            const Scene scene = buildFileScene(p, meshes, file, state, &pieces);
+            if (getenv("INA_FILE_DETAIL")) {   // every piece of the file's objects, placed or not
+                for (uint32_t cls : {kStaticObjectClass, kVehicleClass}) {
+                    size_t missing = 0;
+                    for (const MeshInstance& in : readMeshInstances(p, meshes, &missing, cls)) {
+                        const StaticMesh& m = meshes[in.mesh];
+                        if (m.recordOffset < range.first || m.recordOffset >= range.second) continue;
+                        printf("  class 0x%x %-22s mesh %-34s lod %u..%u flags %u %5zu tris  at %.0f %.0f %.0f\n", cls,
+                               in.objectOid < names.size() ? names[in.objectOid].c_str() : "?", m.nameOid < names.size() ? names[m.nameOid].c_str() : "?",
+                               m.lodMin, m.lodMax, in.flags, m.indices.size() / 3, in.matrix[3], in.matrix[7], in.matrix[11]);
+                    }
+                    printf("  class 0x%x: %zu pieces in the pack use meshes that were not decoded\n", cls, missing);
+                }
+            }
+            printf("file at 0x%x: %zu pieces, %zu triangles, %zu texture groups, box %.0f %.0f %.0f .. %.0f %.0f %.0f\n", file, pieces,
+                   scene.indices.size() / 3, scene.batches.size(), scene.boxMin[0], scene.boxMin[1], scene.boxMin[2], scene.boxMax[0],
+                   scene.boxMax[1], scene.boxMax[2]);
+            if (argc > 6) {
+                FILE* obj = createObj(argv[6]);
+                if (!obj) return 1;
+                for (size_t v = 0; v + 7 < scene.vertices.size(); v += 8)
+                    fprintf(obj, "v %g %g %g\n", scene.vertices[v], scene.vertices[v + 1], scene.vertices[v + 2]);
+                for (size_t k = 0; k + 2 < scene.indices.size(); k += 3)
+                    fprintf(obj, "f %u %u %u\n", scene.indices[k] + 1, scene.indices[k + 1] + 1, scene.indices[k + 2] + 1);
+                fclose(obj);
+            }
             return 0;
         }
         if (cmd == "files" && argc >= 5) {
