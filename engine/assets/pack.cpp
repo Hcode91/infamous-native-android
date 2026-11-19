@@ -81,6 +81,7 @@ void Pack::readFixups() {
             const auto body = seg.subspan(at + 8, size);
             if (memcmp(tag, "ILNK", 4) == 0) readPointerLists(body);
             else if (memcmp(tag, "GLOB", 4) == 0) readSharedGeometry(body);
+            else if (memcmp(tag, "SPLP", 4) == 0) scriptLinks_ = body;
             at += 8 + size_t(size);
         }
     }

@@ -36,6 +36,72 @@ What has been read so far (from the interpreter and checked against the opening 
 - **Clip events.** Clip objects can carry an event track (a fraction of the clip's length and a name);
   the opening shot's clip names six moments of the blast. Script objects receive them as labels.
 
+## The script machine (`engine/script/`)
+
+The engine now has its own machine for this byte code. `ina_tool script <archive> <pack> <oid_manifest.txt>
+<function> [seconds]` runs one script function with no engine behind it and prints, in time order, what the
+script asks for; run on the opening mission's entry function it reaches the end of the function. What the
+machine implements is what was read from the game's interpreter and then confirmed by that run.
+
+**Values and the stack.** One byte stack per thread, growing upward; values are big-endian. Type codes: 1
+bool (1 byte), 2 int, 3 float, 7 name (4 bytes each), 4 and 5 vectors (16 bytes, 16-aligned), 6 matrix (64
+bytes), 14 function value (16 bytes: code, 0, scope, 0), 16 (8 bytes); codes with bit 15 set are lists and
+codes with bits 12-13 set are object references (4 bytes). A list is a record (data pointer, count, element
+type). Pushing a constant first aligns the stack to the constant's alignment.
+
+**Instructions** are 32-bit words: opcode and three operand bytes, some followed by extra words.
+
+| Opcode | Extra words | Meaning |
+|---|---|---|
+| 01 | data | push `b1` inline bytes with alignment `b2` |
+| 02 | | push the bool `b1` |
+| 03-0A | 1 (offset) | copy an argument (size `b1`, `b2` bytes below the caller's stack mark) into the scope |
+| 0B | 1 + data | copy `b1` inline bytes into the current scope |
+| 0C-1B | 1 (offset) | store the top `b1` bytes into the scope `b2` levels up, then pop `b1 + b3` |
+| 1C | 1 (offset) | load `b1` bytes from the scope `b2` levels up into space reserved on the stack |
+| 1D | 2 | function entry: new scope of `b2b3` bytes under the current one, new stack frame |
+| 1E / 1F | 1 / 0 | open / close a nested scope |
+| 22 | | value bookkeeping (reference counts in the original); pops `b1` |
+| 2A, 2C / 2B, 2D | 2 | get / set a property: object pointer and value sit in the top `b1` bytes |
+| 34-36 / 38, 39 | 1 (+1 zero) | engine method / engine function: result slot and arguments are the top `b1` bytes |
+| 37 | 2 (name, 0) | call a script method by name on the object at the top |
+| 3A / 3B / 3D | | pop / reserve / zero `b1` bytes |
+| 3C | | slide `b1` bytes down over `b2` bytes |
+| 3E | | call the function value at the top (pops `b1`) |
+| 3F | | bind the current scope into the function value at the top |
+| 40 | | return; `b2` result bytes go to the slot `b1` below the caller's mark |
+| 41 | | branch if a bool argument is set |
+| 42 | | jump |
+| 43 / 44 / 45 | | branch if the top bool is false (43 always pops; 44 and 45 keep it when taken; 45 tests true) |
+| 46 / 47 / 48 | | list loop: test index against count / fetch the element into a scope variable / next |
+| 4B-6B | | arithmetic, in place: operands in the two slots below the top, result in the slot below them |
+| 6C-7F | | comparisons, same layout, 1-byte result |
+| 80-85 | | and, or, max, min |
+| 88, 8D-90, 9D | | not; int to float, float to int, int to bool, bool to int, is zero |
+| 91, 95, 96, 98 | | list element, build list, list count, list contains |
+| B0 | | push global object number `b2b3` (the pack's table of object names; `b1` = 1 for object lists) |
+| B1 | | end of an initialisation block |
+| B3, B4 | 2 / 4 | zero-initialise a value |
+| 20, 9F, A0, A1-A3, A5, B5-B8 | 1-4 | debug records, skipped |
+
+Branch targets are relative to the instruction. Script time is counted in ticks, 1440 a second; opcodes
+4D, 53 and 54 mix tick counts with seconds.
+
+**Calls.** The caller reserves the result slot, pushes the arguments, pushes the function value and calls;
+the callee copies its arguments into its scope; on return the caller pops the arguments. Engine calls
+write their result over the first of their bytes.
+
+**Pack tables.** Offset 0x40 of the pack's memory points to the table of global object names and 0x44
+holds its length. A script class is a (initialisation block, symbol table, symbol count) triple inside its
+owning object; running the initialisation block in a fresh scope binds the class's functions and sets its
+member variables.
+
+**Not implemented yet:** object creation (A6), list concatenation and search (97, 99), random element
+(9C), string building (9E), member access through an object pointer (A7-AF), the property forms 23-33
+other than 2A-2D, matrix arithmetic. Object lists are returned empty. Scopes are never freed. Engine
+functions other than threads, sleeping and time are not implemented: the opening needs fades, the title
+prompt, the cameras, sound, time of day, spawning and the rest (see docs/PROGRESS.md).
+
 **The opening sequence**, as its script function reads: a screen fill; time-of-day adjustment; after a
 few seconds the logo-and-prompt object is triggered; the script polls the pad each frame until the start
 button is pressed; the prompt is removed, the explosion's music list and a sound mix start, and the first

@@ -20,6 +20,8 @@ add_library(ina_core STATIC
     engine/anim/character_loader.cpp
     engine/anim/leg_ik.cpp
     engine/anim/character_model.cpp
+    engine/script/script_vm.cpp
+    engine/script/script_host.cpp
     engine/world/scene.cpp
     engine/world/city_stream.cpp
     engine/core/png.cpp)

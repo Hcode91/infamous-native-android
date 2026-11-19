@@ -8,6 +8,7 @@
 #include "assets/collision.h"
 #include "assets/hex_map.h"
 #include "assets/pack.h"
+#include "script/script_host.h"
 #include "assets/psarc.h"
 #include "assets/texture.h"
 #include "assets/world_mesh.h"
@@ -740,6 +741,65 @@ int main() {
         const auto range = subFileRange(p, 0x140);
         CHECK(range.first == 0 && range.second == 0x280);
         CHECK(subFileRange(p, 0x290).first == 0x280);
+    }
+    {
+        // Script machine: arithmetic in place, scope variables, an engine function through a link, sleeping,
+        // and a script function called through a closure with an argument and a result.
+        ScriptImage im;
+        im.data.assign(0x400, 0);
+        std::vector<uint32_t> code;
+        auto f = [](float v) { uint32_t u; memcpy(&u, &v, 4); return u; };
+        auto flush = [&](uint32_t at) {
+            for (size_t i = 0; i < code.size(); i++) {
+                const uint32_t x = code[i];
+                im.data[at + 4 * i] = uint8_t(x >> 24); im.data[at + 4 * i + 1] = uint8_t(x >> 16);
+                im.data[at + 4 * i + 2] = uint8_t(x >> 8); im.data[at + 4 * i + 3] = uint8_t(x);
+            }
+            code.clear();
+        };
+        const uint32_t mainAt = 0x100, calleeAt = 0x200;
+        code = {0x1D000020, 0, 0x40,                               // function entry, scope of 0x20 bytes
+                0x3B040000, 0x01040400, f(2), 0x01040400, f(3), 0x5A000000, 0x3A080000,   // 2 * 3
+                0x0C040000, 4,                                     // -> scope variable at 4
+                0x01040400, f(0.5f)};
+        const uint32_t sleepAt = mainAt + 4 * uint32_t(code.size());
+        code.insert(code.end(), {0x38040000, 1, 0, 0x3A040000,     // Sleep(0.5)
+                                 0x3B040000,                       // result slot
+                                 0x3B040000, 0x1C040004, 4,        // argument: the variable
+                                 0x01100400, calleeAt, 0, 0, 0, 0x3F000000, 0x3E100000,   // closure, bind, call
+                                 0x3A040000});
+        const uint32_t reportAt = mainAt + 4 * uint32_t(code.size());
+        code.insert(code.end(), {0x38040003, 1, 0, 0x3A040000, 0x40000000});
+        flush(mainAt);
+        code = {0x1D000010, 0, 0x20,
+                0x03040400, 0,                                     // argument -> scope variable 0
+                0x3B040000, 0x3B040000, 0x1C040004, 0, 0x01040400, f(1), 0x4C000000, 0x3A080000,   // + 1
+                0x40080403};                                       // return 4 bytes into the slot 8 below the mark
+        flush(calleeAt);
+        im.links[sleepAt] = {ScriptLink::Function, 0, 1};
+        im.links[reportAt] = {ScriptLink::Function, 0, 2};
+        const std::vector<std::string> names = {"", "Sleep", "Report"};
+        BasicScriptHost host(names);
+        float reported = 0;
+        double reportedAt = -1;
+        ScriptMachine* vmp = nullptr;
+        host.onFunction = [&](ScriptCall& c, const std::string& fn) {
+            if (fn != "Report") return false;
+            reported = c.argFloat(0);
+            reportedAt = vmp->now();
+            return true;
+        };
+        ScriptMachine vm(std::move(im), host);
+        vmp = &vm;
+        vm.spawn(mainAt, nullptr);
+        vm.update(0.0, 0.1);
+        CHECK(vm.liveThreads() == 1 && reportedAt < 0);            // asleep
+        vm.update(0.3, 0.1);
+        CHECK(reportedAt < 0);
+        vm.update(0.6, 0.1);
+        CHECK(reported == 7.0f && reportedAt == 0.6);
+        CHECK(vm.liveThreads() == 0 && vm.unknownInstructions() == 0);
+        CHECK(scriptTypeSize(5) == 16 && scriptTypeAlign(5) == 16 && scriptTypeSize(1) == 1 && scriptTypeSize(0x2002) == 4);
     }
     (void)bef;
     printf(failures ? "%d FAILED\n" : "all tests passed\n", failures);

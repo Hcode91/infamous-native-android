@@ -6,6 +6,7 @@
 //   ina_tool city <archive holding EMPIRE.xpp> [out.obj] [oid_manifest.txt]             the far-away city and its hex cells
 //   ina_tool clips <archive> <pack> [oid_manifest.txt] [clip] [frame] [out.obj]         animation clips; one clip posed
 //   ina_tool anims <archive> <pack> <oid_manifest.txt> [name filter]                    named animations and their clips
+//   ina_tool script <archive> <pack> <oid_manifest.txt> <function> [seconds]            run a script function, print its requests
 #include "anim/character_model.h"
 #include "anim/anim_set.h"
 #include "anim/character_loader.h"
@@ -15,6 +16,7 @@
 #include "assets/collision.h"
 #include "assets/hex_map.h"
 #include "assets/pack.h"
+#include "script/script_host.h"
 #include "assets/psarc.h"
 #include "assets/texture.h"
 #include "assets/world_mesh.h"
@@ -382,6 +384,51 @@ int main(int argc, char** argv) {
             fclose(obj);
             printf("%zu meshes, %zu triangles, hierarchy at 0x%x (%u joints, %u animated), %zu leg chains, clip 0x%x %u frames\n", count, model.triangles(),
                    skel.offset, skel.jointCount, skel.animatedJoints, legs.size(), clip.offset, clip.frames);
+            return 0;
+        }
+        if (cmd == "script" && argc >= 6) {
+            // ina_tool script <archive> <pack> <oid_manifest.txt> <function> [seconds]: runs one script function with
+            // no engine behind it and prints what the script asks for, in time order
+            const int idx = arc.find(argv[3]);
+            if (idx < 0) {
+                fprintf(stderr, "no pack named %s\n", argv[3]);
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            const auto names = loadNames(argv[4]);
+            BasicScriptHost host(names);
+            ScriptMachine vm(readScriptImage(p), host);
+            printf("%zu script classes, %zu links, %u global objects\n", vm.image().classes.size(), vm.image().links.size(), vm.image().globalsCount);
+            uint32_t fnOid = 0;
+            for (uint32_t i = 0; i < names.size(); i++) if (names[i] == argv[5]) fnOid = i;
+            const int cls = vm.findClassWithFunction(fnOid);
+            if (cls < 0) {
+                fprintf(stderr, "no script class has a function named %s\n", argv[5]);
+                return 1;
+            }
+            double now = 0;
+            std::vector<std::string> recent;   // requests repeated every frame are printed once
+            host.onUnhandled = [&](const std::string& s) {
+                std::string key;
+                for (char ch : s) if (!(ch >= '0' && ch <= '9') && ch != '.' && ch != '-') key += ch;
+                if (std::find(recent.begin(), recent.end(), key) != recent.end()) return;
+                recent.push_back(key);
+                if (recent.size() > 6) recent.erase(recent.begin());
+                printf("%7.2f  %s\n", now, s.c_str());
+            };
+            host.onMethod = [&](ScriptCall& c, const std::string&, const std::string& member) {
+                if (member != "JoyStickThunk.FIsButtonPressed") return false;
+                c.resultBool(now >= 12.0);   // stands in for the player pressing the button
+                return true;
+            };
+            ScriptScope* self = vm.instance(size_t(cls));
+            const uint32_t code = vm.findFunction(size_t(cls), fnOid);
+            printf("class %d (record 0x%x): %s at 0x%x\n", cls, vm.image().classes[size_t(cls)].record, argv[5], code);
+            vm.spawn(code, self);
+            const double end = argc > 6 ? atof(argv[6]) : 60.0;
+            for (; now < end && vm.liveThreads(); now += 1.0 / 30.0) vm.update(now, 1.0 / 30.0);
+            printf("%7.2f  end: %zu threads still running, %u instructions skipped as unknown\n", now, vm.liveThreads(), vm.unknownInstructions());
             return 0;
         }
         if (cmd == "anims" && argc >= 5) {

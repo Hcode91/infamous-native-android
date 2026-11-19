@@ -87,13 +87,15 @@ public:
     const std::vector<GeometryExport>& geometryExports() const { return exports_; }
     const std::vector<GeometryImport>& geometryImports() const { return imports_; }
     const GeometryExport* findGeometry(const GeometryHash& hash) const;
+    // Body of the script link chunk ("SPLP"), empty when the pack has none. See docs/formats/scripts.md.
+    std::span<const uint8_t> scriptLinks() const { return scriptLinks_; }
 
 private:
     void readFixups();
     void readPointerLists(std::span<const uint8_t> body);
     void readSharedGeometry(std::span<const uint8_t> body);
     void readDirectory();
-    std::span<const uint8_t> file_, data_;
+    std::span<const uint8_t> file_, data_, scriptLinks_;
     std::vector<PackRegion> regions_;
     std::vector<PackSegment> segments_;
     std::vector<bool> pointerWords_;   // one flag per word of main memory (all main regions together)
