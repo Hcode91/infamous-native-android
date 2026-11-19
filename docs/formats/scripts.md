@@ -16,10 +16,33 @@ them invalid). Seen so far, provisional until every handler has been read: const
 id, 0x02 boolean, 0x03..0x0A typed), field loads (0x1C), property set and get by type (0x23..0x2D), method
 calls by name (0x37, 0x3E), branches (0x43..0x45), native calls (0x88) and the list end (0xB1).
 
-The opening mission's pack (`msn_jb_intro.sprig.xpp`) carries 5,143 property links. Its script names the
-mission's checkpoints, its cameras, the explosion's music list, the first controller prompts and the
-player's ability switches, so the opening sequence is this script: it cannot be reproduced faithfully
-without running it.
+What has been read so far (from the interpreter and checked against the opening mission's data):
+
+- It is a typed stack machine with nested scopes. Instructions reserve and release stack bytes, push
+  constants (inline, any size), load and store scope variables by (scope depth, offset), get and set
+  engine properties, branch, call script functions and call engine functions.
+- A script function is a 16-byte closure value: a code pointer plus the scope it was created in. Functions
+  start with an entry instruction carrying their frame size and end with a return.
+- **Script objects.** A script object is an initialisation block that stores constants and closures into
+  its scope variables, followed by a symbol table of 16-byte entries: name, offset, type, zero. The table
+  names every member variable and method, so every function can be named. The opening mission has 319
+  functions (`OnMissionStart`, `Setup`, `PlayDialog`, `RunBattle`, per-sector `SetupHex...`).
+- **Links to the engine.** `SPLP` has three sections, counted by its first three words: property links of
+  3 words (offset, class, property), property links of 7 words, and function links of 6 words (the offset
+  of a call instruction, a slot, the function's name) with extra words after some. The opening mission
+  links 716 calls to 81 engine functions; the most used are `Sleep`, `CtsThreadCreate` (start a script
+  thread), `RetractThread`, `ObjFind`, `HeroFind`, `MissionTriggered`, `SndEffect`, `EventCreate`,
+  `WaitForEvent`. Scripts are cooperative threads that sleep and wait.
+- **Clip events.** Clip objects can carry an event track (a fraction of the clip's length and a name);
+  the opening shot's clip names six moments of the blast. Script objects receive them as labels.
+
+**The opening sequence**, as its script function reads: a screen fill; time-of-day adjustment; after a
+few seconds the logo-and-prompt object is triggered; the script polls the pad each frame until the start
+button is pressed; the prompt is removed, the explosion's music list and a sound mix start, and the first
+camera plays its `start` clip (the blast, with its six labelled moments); the district's power grid is
+switched off; a second camera shot follows with another sound mix; fills cover the cut; the mission's
+first subtask is completed and a thread warps the player on. Not yet resolved: the script functions called
+between those steps, and what each label does.
 
 **Missions.** Each mission has its own `.sprig.xpp` pack (140 of them). They hold the mission's objects:
 transform markers (`XoData`), trigger and camera volumes, logic lists (`LoListData`), user-interface
