@@ -15,11 +15,15 @@ void main() {
     int mode = int(pc.toSun.w + 0.5);
     vec4 t = texture(colorMap, vUv);
     if (mode == 1 && t.a < 0.5) discard;
-    vec3 n = normalize(vNormal);
+    // The normal's length carries the vertex's baked ambient light: length = 2 - ambient (3: see below).
+    float nl = length(vNormal);
+    float baked = clamp(2.0 - nl, 0.0, 1.0);
+    vec3 n = vNormal / max(nl, 1e-4);
     // Many meshes are single-sided cards or have flipped normals: light them from both sides, the back at half.
     float d = dot(n, pc.toSun.xyz);
     float lit = d > 0.0 ? d : -0.5 * d;
-    vec3 c = t.rgb * (pc.ambient.rgb + pc.sun.rgb * lit);
+    vec3 c = t.rgb * (pc.ambient.rgb * baked + pc.sun.rgb * lit);
+    if (nl > 2.5) c = t.rgb;   // a surface with its own light (length 3): shown as it is
     // Haze: none before the start distance, complete at the end distance, a curve through the middle value.
     float span = max(pc.sun.w - pc.ambient.w, 1.0);
     float x = clamp((vDistance - pc.ambient.w) / span, 0.0, 1.0);

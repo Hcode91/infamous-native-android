@@ -92,6 +92,22 @@ by eye. The engine's table (`engine/assets/vertex_layout.cpp`) holds the result;
 | `deferred_tree_frond` | 10: half3 position, uv | 4 | A + 6 |
 | `deferred_tree_branch` | 6: half3 position | 12: float2 uv, packed normal | B + 0, float2 |
 
+**Normals and baked ambient light.** The effects name this input `i_normal_uAmbient`: each vertex has its
+normal and one number for the ambient light that reaches it (0.3 to 1 in the sector examined, mostly above
+0.8). Two encodings, both next to the texture coordinates:
+
+- four half-floats (normal x, y, z, ambient) right before the coordinates: `deferred_object`,
+  `deferred_prelit`, the `deferred_scroll_*` effects;
+- in the layouts with a second stream and coordinates at +8: the normal packed in the word at +0 (x and y
+  in 11 bits each, z in the top 10, signed, divided by 1023 and 511) and the ambient value as a half-float
+  at +12, after the coordinates; its sign is a separate flag. The word at +4 is packed the same way
+  (presumably the tangent).
+
+Checked on sector A23: the decoded vectors have unit length and agree with normals computed from the
+triangles (mean dot product 0.96 to 1.0 per effect). The engine uses them and multiplies the ambient
+light by the baked value. Effects with `prelit` in the name (lit windows, signs, screens) are drawn at
+their texture's own brightness.
+
 Positions are three big-endian floats except in the tree effects, which use half-floats. When the effect
 name is not known (no `oid_manifest.txt`), the layouts whose sizes fit the streams exactly are tried. In all
 cases the decoded positions must lie inside the record's bounding box.

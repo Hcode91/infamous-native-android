@@ -21,23 +21,39 @@ void SceneBuilder::add(const StaticMesh& m, const float tm[12], const float offs
         placed[v * 3 + 2] = tm[8] * x + tm[9] * y + tm[10] * z + tm[11] + offset[2];
         for (int c = 0; c < 3; c++) sum[c] += placed[v * 3 + size_t(c)];
     }
-    // Smooth normals from the triangles: the game's own normals are in a vertex stream not decoded yet.
+    // Normals: the mesh's own where it has them, rotated with the piece; otherwise smooth normals from the
+    // triangles. The baked ambient light rides in the normal's length, 2 - ambient, so that plain unit normals
+    // (characters, meshes without the data) mean full ambient light; the shader takes it apart again.
+    // (Lengths survive rotation, so skinned and moved models need no change.)
+    const bool own = m.normalAmbient.size() == nv * 4;
     std::vector<float> normal(nv * 3, 0.0f);
-    for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
-        const float* a = &placed[m.indices[t] * 3];
-        const float* b = &placed[m.indices[t + 1] * 3];
-        const float* c = &placed[m.indices[t + 2] * 3];
-        const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, v[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
-        const float fn[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
-        for (int k = 0; k < 3; k++)
-            for (int c2 = 0; c2 < 3; c2++) normal[m.indices[t + size_t(k)] * 3 + size_t(c2)] += fn[c2];
+    if (own) {
+        for (size_t v = 0; v < nv; v++) {
+            const float* n = &m.normalAmbient[v * 4];
+            normal[v * 3] = tm[0] * n[0] + tm[1] * n[1] + tm[2] * n[2];
+            normal[v * 3 + 1] = tm[4] * n[0] + tm[5] * n[1] + tm[6] * n[2];
+            normal[v * 3 + 2] = tm[8] * n[0] + tm[9] * n[1] + tm[10] * n[2];
+        }
+    } else {
+        for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
+            const float* a = &placed[m.indices[t] * 3];
+            const float* b = &placed[m.indices[t + 1] * 3];
+            const float* c = &placed[m.indices[t + 2] * 3];
+            const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, v[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+            const float fn[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+            for (int k = 0; k < 3; k++)
+                for (int c2 = 0; c2 < 3; c2++) normal[m.indices[t + size_t(k)] * 3 + size_t(c2)] += fn[c2];
+        }
     }
     const uint32_t base = uint32_t(g.vertices.size() / 8);
     for (size_t v = 0; v < nv; v++) {
         const float* nn = &normal[v * 3];
         const float len = std::sqrt(nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]);
+        const float ambient = own ? std::clamp(m.normalAmbient[v * 4 + 3], 0.0f, 1.0f) : 1.0f;
+        // A normal of length 3 marks a surface that carries its own light.
+        const float scale = len > 0 ? (m.prelit ? 3.0f : 2.0f - ambient) / len : 0.0f;
         for (int c = 0; c < 3; c++) g.vertices.push_back(placed[v * 3 + size_t(c)]);
-        for (int c = 0; c < 3; c++) g.vertices.push_back(len > 0 ? nn[c] / len : (c == 2 ? 1.0f : 0.0f));
+        for (int c = 0; c < 3; c++) g.vertices.push_back(len > 0 ? nn[c] * scale : (c == 2 ? 1.0f : 0.0f));
         g.vertices.push_back(m.uvs.empty() ? 0.0f : m.uvs[v * 2]);
         g.vertices.push_back(m.uvs.empty() ? 0.0f : m.uvs[v * 2 + 1]);
     }

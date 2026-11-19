@@ -117,6 +117,9 @@ int decodeMesh(const Pack& pack, size_t rec, const Pack& src, const uint32_t str
     std::string_view effect;
     if (names && m.effectOid < names->size()) effect = (*names)[m.effectOid];
     m.mode = effect.empty() ? DrawMode::Opaque : drawModeForEffect(effect);
+    // "prelit" effects show their texture at its own brightness; the "and_prelit_mask" ones are ordinary surfaces
+    // with a lit part chosen by a mask, which is not decoded, so they are treated as ordinary.
+    m.prelit = effect.find("prelit") != std::string::npos && effect.find("and_prelit") == std::string::npos;
 
     auto tryLayout = [&](const VertexLayout& L, bool exact) -> bool {
         if ((L.strideB != 0) != hasB) return false;
@@ -149,6 +152,40 @@ int decodeMesh(const Pack& pack, size_t rec, const Pack& src, const uint32_t str
                 if (!std::isfinite(u) || !std::isfinite(w)) u = w = 0.0f;
                 m.uvs[size_t(v) * 2] = u;
                 m.uvs[size_t(v) * 2 + 1] = w;
+            }
+            // Normal and baked ambient: accepted only when (nearly) every vector there has unit length.
+            m.normalAmbient.clear();
+            if (!L.uvFloat && L.uvOffset >= 8 && vertices > 0) {
+                std::vector<float> na(size_t(vertices) * 4);
+                uint32_t good = 0;
+                for (uint32_t v = 0; v < vertices; v++) {
+                    const uint8_t* p = data.data() + base + size_t(v) * stride + L.uvOffset - 8;
+                    float* o = &na[size_t(v) * 4];
+                    for (int c = 0; c < 4; c++) o[c] = half(p + 2 * c);
+                    const float len2 = o[0] * o[0] + o[1] * o[1] + o[2] * o[2];
+                    if (std::isfinite(len2) && std::isfinite(o[3]) && len2 > 0.9f && len2 < 1.1f) good++;
+                }
+                if (uint64_t(good) * 100 >= uint64_t(vertices) * 97) m.normalAmbient = std::move(na);
+            }
+            // The other form (second stream, coordinates at +8): a normal packed in one word at +0 (x and y 11
+            // bits, z 10 bits, signed) and the ambient light as a half-float after the coordinates, whose sign
+            // is a separate flag.
+            if (m.normalAmbient.empty() && !L.uvFloat && L.uvStream == 1 && L.uvOffset == 8 && L.strideB >= 14 && vertices > 0) {
+                std::vector<float> na(size_t(vertices) * 4);
+                uint32_t good = 0;
+                for (uint32_t v = 0; v < vertices; v++) {
+                    const uint8_t* p = data.data() + base + size_t(v) * stride;
+                    const uint32_t w = uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
+                    auto sx = [](uint32_t x, int bits) { return float(int32_t(x << (32 - bits)) >> (32 - bits)); };
+                    float* o = &na[size_t(v) * 4];
+                    o[0] = sx(w & 0x7FF, 11) / 1023.0f;
+                    o[1] = sx((w >> 11) & 0x7FF, 11) / 1023.0f;
+                    o[2] = sx(w >> 22, 10) / 511.0f;
+                    o[3] = std::fabs(half(p + 12));
+                    const float len2 = o[0] * o[0] + o[1] * o[1] + o[2] * o[2];
+                    if (std::isfinite(o[3]) && o[3] <= 1.01f && len2 > 0.9f && len2 < 1.1f) good++;
+                }
+                if (uint64_t(good) * 100 >= uint64_t(vertices) * 97) m.normalAmbient = std::move(na);
             }
         }
         if (effect.empty()) m.mode = L.mode;

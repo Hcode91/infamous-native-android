@@ -407,6 +407,34 @@ int main(int argc, char** argv) {
                    skel.offset, skel.jointCount, skel.animatedJoints, legs.size(), clip.offset, clip.frames);
             return 0;
         }
+        if (cmd == "normals" && argc >= 5) {
+            // ina_tool normals <archive> <pack> <oid_manifest.txt>: per effect, how many meshes carry their own normals
+            // and baked ambient light, and the range of that light
+            const int idx = arc.find(argv[3]);
+            if (idx < 0) {
+                fprintf(stderr, "no pack named %s\n", argv[3]);
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            const auto names = loadNames(argv[4]);
+            struct Row { size_t meshes = 0, with = 0, vertices = 0; double sum = 0; float lo = 1e9f, hi = -1e9f; };
+            std::map<std::string, Row> rows;
+            for (const StaticMesh& m : readStaticMeshes(p, nullptr, nullptr, &names)) {
+                Row& r = rows[m.effectOid < names.size() ? names[m.effectOid] : "?"];
+                r.meshes++;
+                if (m.normalAmbient.empty()) continue;
+                r.with++;
+                for (size_t v = 3; v < m.normalAmbient.size(); v += 4) {
+                    const float a = m.normalAmbient[v];
+                    r.sum += a; r.vertices++; r.lo = std::min(r.lo, a); r.hi = std::max(r.hi, a);
+                }
+            }
+            for (const auto& [name, r] : rows)
+                printf("%-44s %4zu meshes, %4zu with normals; ambient %.2f .. %.2f, mean %.2f\n", name.c_str(), r.meshes, r.with, r.with ? r.lo : 0.0f,
+                       r.with ? r.hi : 0.0f, r.vertices ? r.sum / double(r.vertices) : 0.0);
+            return 0;
+        }
         if (cmd == "camera" && argc >= 7) {
             // ina_tool camera <archive> <pack> <oid_manifest.txt> <animation node> <clip object> [step seconds]:
             // a camera rig's path: time, eye (relative to its anchor), forward, up, field of view

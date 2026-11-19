@@ -24,9 +24,14 @@ struct StaticMesh {
     bool shared = false;                       // vertex data borrowed from the shared pack
     uint32_t effectOid = 0;                    // the material's effect (vertex and fragment programs), by name id
     DrawMode mode = DrawMode::Opaque;          // from the effect name when names are given
+    bool prelit = false;                       // an effect that carries its own light (lit windows, signs, screens)
     uint32_t vertexStride = 0;            // bytes per vertex in the position stream
     std::vector<float> positions;         // x, y, z per vertex with `origin` added; z is up
     std::vector<float> uvs;               // u, v per vertex; empty when the layout was not recognised
+    // The vertex's own normal (x, y, z) and its baked ambient light (0..1), four floats per vertex. In the
+    // layouts with half-float texture coordinates these are four half-floats right before the coordinates
+    // (the effects call the input `i_normal_uAmbient`). Empty when the data there is not unit normals.
+    std::vector<float> normalAmbient;
     std::vector<uint32_t> indices;        // triangle list
     uint32_t colorTextureOid = 0;         // the material's colour texture (0 when it has none)
 };
