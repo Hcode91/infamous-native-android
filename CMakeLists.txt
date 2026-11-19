@@ -26,6 +26,7 @@ add_library(ina_core STATIC
     engine/world/scene.cpp
     engine/world/spawn.cpp
     engine/world/time_of_day.cpp
+    engine/world/sector_lights.cpp
     engine/world/city_stream.cpp
     engine/core/png.cpp)
 target_include_directories(ina_core PUBLIC engine)

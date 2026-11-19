@@ -48,7 +48,7 @@ CharacterModel::CharacterModel(std::vector<Part> parts, Skeleton skeleton, const
             carried_.push_back(carried ? 1 : 0);
             const float x = m.positions[v * 3] + offset_[0], y = m.positions[v * 3 + 1] + offset_[1], z = m.positions[v * 3 + 2] + offset_[2];
             const float uvx = v * 2 + 1 < m.uvs.size() ? m.uvs[v * 2] : 0.0f, uvy = v * 2 + 1 < m.uvs.size() ? m.uvs[v * 2 + 1] : 0.0f;
-            scene_.vertices.insert(scene_.vertices.end(), {x, y, z, nr[0], nr[1], nr[2], uvx, uvy});
+            scene_.vertices.insert(scene_.vertices.end(), {x, y, z, nr[0], nr[1], nr[2], uvx, uvy, 0.0f});
             const float pos[3] = {x, y, z};
             for (int k = 0; k < 3; k++) {
                 scene_.boxMin[k] = first ? pos[k] : std::min(scene_.boxMin[k], pos[k]);
@@ -83,7 +83,7 @@ CharacterModel::CharacterModel(std::vector<Part> parts, Skeleton skeleton, const
 
 void CharacterModel::skin(const std::vector<float>& world, std::vector<float>& vertices, const float* root) const {
     const size_t n = skeleton_.jointCount, nv = bindPositions_.size() / 3;
-    if (world.size() < n * 12 || vertices.size() < nv * 8 || skeleton_.inverseBind.size() < n * 12) return;
+    if (world.size() < n * 12 || vertices.size() < nv * kVertexFloats || skeleton_.inverseBind.size() < n * 12) return;
     std::vector<float> m(n * 12);   // world * inverse bind
     for (size_t j = 0; j < n; j++) {
         const float* w = &world[j * 12];
@@ -107,7 +107,7 @@ void CharacterModel::skin(const std::vector<float>& world, std::vector<float>& v
             }
             total += wt;
         }
-        float* out = &vertices[v * 8];
+        float* out = &vertices[v * kVertexFloats];
         if (total <= 0) {   // unskinned vertex: leave it in the bind pose
             for (int k = 0; k < 3; k++) {
                 out[k] = root ? root[k * 4] * p[0] + root[k * 4 + 1] * p[1] + root[k * 4 + 2] * p[2] + root[k * 4 + 3] : p[k] + offset_[k];

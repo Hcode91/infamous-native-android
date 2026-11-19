@@ -6,6 +6,8 @@
 //   ina_tool city <archive holding EMPIRE.xpp> [out.obj] [oid_manifest.txt]             the far-away city and its hex cells
 //   ina_tool clips <archive> <pack> [oid_manifest.txt] [clip] [frame] [out.obj]         animation clips; one clip posed
 //   ina_tool anims <archive> <pack> <oid_manifest.txt> [name filter]                    named animations and their clips
+//   ina_tool lights <archive> <sector pack> <oid_manifest.txt>                          placed entities and lamps
+//   ina_tool normals <archive> <pack> <oid_manifest.txt>                                own normals and baked light, per effect
 //   ina_tool tod <archive holding EMPIRE.xpp> <name> <oid_manifest.txt>                 a time of day's lighting
 //   ina_tool file <archive> <pack> <oid_manifest.txt> <file name> [out.obj]             one merged file's model
 //   ina_tool files <archive> <pack> <oid_manifest.txt>                                  files merged into a pack, meshes in each
@@ -22,6 +24,7 @@
 #include "assets/hex_map.h"
 #include "assets/pack.h"
 #include "script/property_set.h"
+#include "world/sector_lights.h"
 #include "world/spawn.h"
 #include "world/time_of_day.h"
 #include "script/script_host.h"
@@ -222,7 +225,7 @@ int main(int argc, char** argv) {
                     fprintf(stderr, "cannot write %s\n", objPath);
                     return 1;
                 }
-                for (size_t v = 0; v + 7 < scene.vertices.size(); v += 8)
+                for (size_t v = 0; v + kVertexFloats <= scene.vertices.size(); v += kVertexFloats)
                     fprintf(obj, "v %g %g %g\n", scene.vertices[v], scene.vertices[v + 1], scene.vertices[v + 2]);
                 for (size_t k = 0; k + 2 < scene.indices.size(); k += 3)
                     fprintf(obj, "f %u %u %u\n", scene.indices[k] + 1, scene.indices[k + 1] + 1, scene.indices[k + 2] + 1);
@@ -399,12 +402,34 @@ int main(int argc, char** argv) {
             model.skin(world, v);
             FILE* obj = createObj(argv[9]);
             if (!obj) return 1;
-            for (size_t i = 0; i + 7 < v.size(); i += 8) fprintf(obj, "v %.3f %.3f %.3f\n", v[i], v[i + 1], v[i + 2]);
+            for (size_t i = 0; i + kVertexFloats <= v.size(); i += kVertexFloats) fprintf(obj, "v %.3f %.3f %.3f\n", v[i], v[i + 1], v[i + 2]);
             const auto& ix = model.scene().indices;
             for (size_t i = 0; i + 2 < ix.size(); i += 3) fprintf(obj, "f %u %u %u\n", ix[i] + 1, ix[i + 1] + 1, ix[i + 2] + 1);
             fclose(obj);
             printf("%zu meshes, %zu triangles, hierarchy at 0x%x (%u joints, %u animated), %zu leg chains, clip 0x%x %u frames\n", count, model.triangles(),
                    skel.offset, skel.jointCount, skel.animatedJoints, legs.size(), clip.offset, clip.frames);
+            return 0;
+        }
+        if (cmd == "lights" && argc >= 5) {
+            // ina_tool lights <archive> <sector pack> <oid_manifest.txt>: the sector's placed entities and its lamps
+            const int idx = arc.find(argv[3]);
+            if (idx < 0) {
+                fprintf(stderr, "no pack named %s\n", argv[3]);
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            const auto names = loadNames(argv[4]);
+            const auto instances = readSectorInstances(p, names.size());
+            std::map<std::string, int> count;
+            for (const SectorInstance& in : instances) count[names[in.proxyOid]]++;
+            printf("%zu placed entities of %zu kinds\n", instances.size(), count.size());
+            const float zero[3] = {0, 0, 0};
+            const auto lights = readSectorLights(p, readScriptImage(p), names, zero);
+            printf("%zu lights\n", lights.size());
+            for (size_t i = 0; i < lights.size() && i < 12; i++)
+                printf("  at %8.0f %8.0f %6.0f  reach %4.0f..%4.0f  colour %.2f %.2f %.2f\n", lights[i].position[0], lights[i].position[1], lights[i].position[2],
+                       lights[i].inner, lights[i].outer, lights[i].color[0], lights[i].color[1], lights[i].color[2]);
             return 0;
         }
         if (cmd == "normals" && argc >= 5) {
@@ -540,7 +565,7 @@ int main(int argc, char** argv) {
             if (argc > 6) {
                 FILE* obj = createObj(argv[6]);
                 if (!obj) return 1;
-                for (size_t v = 0; v + 7 < scene.vertices.size(); v += 8)
+                for (size_t v = 0; v + kVertexFloats <= scene.vertices.size(); v += kVertexFloats)
                     fprintf(obj, "v %g %g %g\n", scene.vertices[v], scene.vertices[v + 1], scene.vertices[v + 2]);
                 for (size_t k = 0; k + 2 < scene.indices.size(); k += 3)
                     fprintf(obj, "f %u %u %u\n", scene.indices[k] + 1, scene.indices[k + 1] + 1, scene.indices[k + 2] + 1);
@@ -817,7 +842,7 @@ int main(int argc, char** argv) {
                 model.skin(world, v);
                 FILE* obj = createObj(argv[7]);
                 if (!obj) return 1;
-                for (size_t i = 0; i + 7 < v.size(); i += 8) fprintf(obj, "v %.3f %.3f %.3f\n", v[i], v[i + 1], v[i + 2]);
+                for (size_t i = 0; i + kVertexFloats <= v.size(); i += kVertexFloats) fprintf(obj, "v %.3f %.3f %.3f\n", v[i], v[i + 1], v[i + 2]);
                 const auto& ix = model.scene().indices;
                 for (size_t i = 0; i + 2 < ix.size(); i += 3) fprintf(obj, "f %u %u %u\n", ix[i] + 1, ix[i + 1] + 1, ix[i + 2] + 1);
                 fclose(obj);

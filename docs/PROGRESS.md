@@ -77,3 +77,8 @@ objectives. That sequence is the opening mission's script, so the order is:
    objectives (prompts and text, player switches, dialogue).
 4. The machine's missing instructions (object creation, object lists) and script methods on spawned objects.
 5. Sky, lighting and fog from the opening's cube maps.
+
+## 2026-11-19: lamps
+
+- Sector entity placements decoded (0x4C-byte records); lights found inside the placed prototypes.
+- Vertices carry a ninth value, lamp light, computed when a sector is built. Host-verified on one sector (17 lights, park lamps at the lamp heads). Not yet seen on a device.

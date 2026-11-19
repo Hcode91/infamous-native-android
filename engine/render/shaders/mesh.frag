@@ -10,6 +10,7 @@ layout(push_constant) uniform Push {
 layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec2 vUv;
 layout(location = 2) in float vDistance;
+layout(location = 3) in vec3 vLight;
 layout(location = 0) out vec4 color;
 void main() {
     int mode = int(pc.toSun.w + 0.5);
@@ -22,7 +23,7 @@ void main() {
     // Many meshes are single-sided cards or have flipped normals: light them from both sides, the back at half.
     float d = dot(n, pc.toSun.xyz);
     float lit = d > 0.0 ? d : -0.5 * d;
-    vec3 c = t.rgb * (pc.ambient.rgb * baked + pc.sun.rgb * lit);
+    vec3 c = t.rgb * (pc.ambient.rgb * baked + pc.sun.rgb * lit + vLight);
     if (nl > 2.5) c = t.rgb;   // a surface with its own light (length 3): shown as it is
     // Haze: none before the start distance, complete at the end distance, a curve through the middle value.
     float span = max(pc.sun.w - pc.ambient.w, 1.0);

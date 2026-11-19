@@ -278,13 +278,13 @@ bool VkRenderer::init(ANativeWindow* window) {
     }
     stages[0].module = vs;
     stages[1].module = fs;
-    const VkVertexInputBindingDescription vbind{0, 32, VK_VERTEX_INPUT_RATE_VERTEX};
-    const VkVertexInputAttributeDescription vattr[3] = {{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12},
-                                                         {2, 0, VK_FORMAT_R32G32_SFLOAT, 24}};
+    const VkVertexInputBindingDescription vbind{0, 36, VK_VERTEX_INPUT_RATE_VERTEX};   // nine floats: see kVertexFloats
+    const VkVertexInputAttributeDescription vattr[4] = {{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12},
+                                                         {2, 0, VK_FORMAT_R32G32_SFLOAT, 24}, {3, 0, VK_FORMAT_R32_SFLOAT, 32}};
     VkPipelineVertexInputStateCreateInfo mvi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     mvi.vertexBindingDescriptionCount = 1;
     mvi.pVertexBindingDescriptions = &vbind;
-    mvi.vertexAttributeDescriptionCount = 3;
+    mvi.vertexAttributeDescriptionCount = 4;
     mvi.pVertexAttributeDescriptions = vattr;
     ds.depthTestEnable = VK_TRUE;
     ds.depthWriteEnable = VK_TRUE;

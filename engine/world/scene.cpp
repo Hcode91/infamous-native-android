@@ -45,7 +45,7 @@ void SceneBuilder::add(const StaticMesh& m, const float tm[12], const float offs
                 for (int c2 = 0; c2 < 3; c2++) normal[m.indices[t + size_t(k)] * 3 + size_t(c2)] += fn[c2];
         }
     }
-    const uint32_t base = uint32_t(g.vertices.size() / 8);
+    const uint32_t base = uint32_t(g.vertices.size() / kVertexFloats);
     for (size_t v = 0; v < nv; v++) {
         const float* nn = &normal[v * 3];
         const float len = std::sqrt(nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]);
@@ -56,6 +56,7 @@ void SceneBuilder::add(const StaticMesh& m, const float tm[12], const float offs
         for (int c = 0; c < 3; c++) g.vertices.push_back(len > 0 ? nn[c] * scale : (c == 2 ? 1.0f : 0.0f));
         g.vertices.push_back(m.uvs.empty() ? 0.0f : m.uvs[v * 2]);
         g.vertices.push_back(m.uvs.empty() ? 0.0f : m.uvs[v * 2 + 1]);
+        g.vertices.push_back(0.0f);   // lamp light: filled in by lightScene
     }
     for (uint32_t i : m.indices) g.indices.push_back(base + i);
     for (int c = 0; c < 3; c++) centers_.push_back(sum[c] / float(nv));
@@ -63,12 +64,18 @@ void SceneBuilder::add(const StaticMesh& m, const float tm[12], const float offs
     triangles_ += m.indices.size() / 3;
 }
 
+float packLight(const float rgb[3]) {
+    uint32_t v = 0;
+    for (int k = 0; k < 3; k++) v |= uint32_t(std::clamp(rgb[k] * 127.5f, 0.0f, 255.0f)) << (8 * k);
+    return float(v);
+}
+
 Scene SceneBuilder::finish() {
     Scene s;
     s.pieces = pieces_;
     bool first = true;
     for (auto& [key, g] : groups_) {
-        const uint32_t base = uint32_t(s.vertices.size() / 8);
+        const uint32_t base = uint32_t(s.vertices.size() / kVertexFloats);
         SceneBatch b;
         b.firstIndex = uint32_t(s.indices.size());
         b.indexCount = uint32_t(g.indices.size());
@@ -76,7 +83,7 @@ Scene SceneBuilder::finish() {
         b.mode = key.first >= 2 ? DrawMode::Decal : (key.first == 1 ? DrawMode::Cutout : DrawMode::Opaque);
         b.layer = key.first >= 2 ? uint8_t(key.first - 2) : 0;
         s.batches.push_back(b);
-        for (size_t v = 0; v + 7 < g.vertices.size(); v += 8) {
+        for (size_t v = 0; v + kVertexFloats <= g.vertices.size(); v += kVertexFloats) {
             for (int c = 0; c < 3; c++) {
                 const float x = g.vertices[v + size_t(c)];
                 if (first || x < s.boxMin[c]) s.boxMin[c] = x;

@@ -410,7 +410,7 @@ int main() {
             b.add(meshes[0], inst[0].matrix.data(), moved);
             CHECK(b.pieces() == 2 && b.triangles() == 2 && b.centers().size() == 6);
             const Scene s = b.finish();
-            CHECK(s.vertices.size() == 6 * 8 && s.indices.size() == 6 && s.batches.size() == 1);
+            CHECK(s.vertices.size() == 6 * kVertexFloats && s.indices.size() == 6 && s.batches.size() == 1);
             CHECK(s.indices[3] == 3 && s.batches[0].indexCount == 6 && s.batches[0].textureOid == 0);
             CHECK(s.boxMin[0] == 999.0f && s.boxMax[1] == 51.0f);
             CHECK(std::fabs(s.vertices[5] - 0.7071f) < 0.001f && std::fabs(s.vertices[4] + 0.7071f) < 0.001f);   // unit normal of the triangle
@@ -693,10 +693,10 @@ int main() {
         parts.push_back(part);
         const float off[3] = {1000, 0, 0};
         const CharacterModel model(std::move(parts), s, off);
-        CHECK(model.triangles() == 1 && model.scene().vertices.size() == 24 && model.scene().batches.size() == 1);
+        CHECK(model.triangles() == 1 && model.scene().vertices.size() == 3 * kVertexFloats && model.scene().batches.size() == 1);
         std::vector<float> v = model.scene().vertices;
         model.skin(w, v);
-        CHECK(std::fabs(v[0] - (1000 - 5 + 20)) < 1e-2f && std::fabs(v[2] - 30) < 1e-2f && std::fabs(v[8] - (1000 - 4 + 20)) < 1e-2f);
+        CHECK(std::fabs(v[0] - (1000 - 5 + 20)) < 1e-2f && std::fabs(v[2] - 30) < 1e-2f && std::fabs(v[kVertexFloats] - (1000 - 4 + 20)) < 1e-2f);
     }
 
     // Named animations: a node points at a list, the list at an object table slot, the slot at a clip

@@ -37,6 +37,7 @@
 #include "script/script_host.h"
 #include "world/city_stream.h"
 #include "world/scene.h"
+#include "world/sector_lights.h"
 #include "world/spawn.h"
 #include "world/time_of_day.h"
 
@@ -482,13 +483,14 @@ void rotate(const float q[4], const float v[3], float out[3]) {
 // A model's vertices (position, normal, uv) moved to a placement.
 void placeVertices(const std::vector<float>& model, const State::Opening::Placement& at, std::vector<float>& out) {
     out.resize(model.size());
-    for (size_t v = 0; v + 7 < model.size(); v += 8) {
+    for (size_t v = 0; v + kVertexFloats <= model.size(); v += kVertexFloats) {
         float p[3], n[3];
         rotate(at.q, &model[v], p);
         rotate(at.q, &model[v + 3], n);
         for (int k = 0; k < 3; k++) { out[v + size_t(k)] = p[k] + at.pos[k]; out[v + 3 + size_t(k)] = n[k]; }
         out[v + 6] = model[v + 6];
         out[v + 7] = model[v + 7];
+        out[v + 8] = model[v + 8];
     }
 }
 
@@ -1041,6 +1043,13 @@ void loaderLoop() {
                     const HexCell* cell = g.layout->cell(w.sector);
                     const float zero[3] = {0, 0, 0};
                     j.chunks = buildSectorChunks(p, g.shared.get(), &g.names, w.level, cell ? cell->center : zero, 3);
+                    if (w.level == 0) {   // the sector's lamps, added to its vertices
+                        try {
+                            const auto lights = readSectorLights(p, readScriptImage(p), g.names, cell ? cell->center : zero);
+                            for (Chunk& ch : j.chunks) lightScene(ch.scene, lights);
+                        } catch (const std::exception&) {
+                        }
+                    }
                     if (w.level == 0) {
                         // the sector's collision, for keeping the camera on the ground
                         auto ground = std::make_shared<GroundGrid>();

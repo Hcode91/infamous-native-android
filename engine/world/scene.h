@@ -10,6 +10,13 @@
 
 namespace ina {
 
+// A scene vertex: position (3), normal (3; its length carries the baked ambient light), texture coordinates
+// (2) and the light of nearby lamps as one number, red + 256 * green + 65536 * blue with each 0..255 standing
+// for 0..2.
+inline constexpr size_t kVertexFloats = 9;
+float packLight(const float rgb[3]);
+
+
 struct SceneBatch {
     uint32_t firstIndex = 0, indexCount = 0;
     uint32_t textureOid = 0;      // 0: untextured
@@ -18,7 +25,7 @@ struct SceneBatch {
 };
 
 struct Scene {
-    std::vector<float> vertices;  // position xyz, normal xyz, uv: 8 floats per vertex
+    std::vector<float> vertices;  // kVertexFloats per vertex: position xyz, normal xyz, uv, packed light
     std::vector<uint32_t> indices;
     std::vector<SceneBatch> batches;
     size_t pieces = 0;
