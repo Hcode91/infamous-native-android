@@ -46,6 +46,13 @@ What has been read so far (from the interpreter and checked against the opening 
 - **Clip events.** Clip objects can carry an event track (a fraction of the clip's length and a name);
   the opening shot's clip names six moments of the blast. Script objects receive them as labels.
 
+**Time of day.** `TimeOfDayParams` objects (class 0x214) in the city pack, named `time_of_day_<name>`, hold
+the lighting of each time of day as a property set: `SKYBOX` (the sky pack), `DIRECTIONAL_LIGHT` (a light
+object, which shines along its own +X axis and has `COLOR` and `REVERSE_LIGHT_COLOR`), `AMBIENT_SKY_COLOR`,
+`AMBIENT_MULTIPLIER`, `HAZE_DISTANCE` (start, end), `HAZE_ALPHA_MID`, depth of field, desaturation, rim
+light and film grain. Colours are (hue in degrees, saturation, value). Missions carry partial sets
+(`todp_...`) that scripts blend in with `TodaCreate` and `SET_LERP`. `ina_tool tod` prints one.
+
 ## The script machine (`engine/script/`)
 
 The engine now has its own machine for this byte code. `ina_tool script <archive> <pack> <oid_manifest.txt>

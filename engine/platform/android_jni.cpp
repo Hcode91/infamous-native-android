@@ -38,6 +38,7 @@
 #include "world/city_stream.h"
 #include "world/scene.h"
 #include "world/spawn.h"
+#include "world/time_of_day.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "ina", __VA_ARGS__)
 
@@ -163,6 +164,8 @@ struct State {
     std::atomic<float> coverUi{0}, coverR{0}, coverG{0}, coverB{0};   // for the app's colour cover and prompt
     std::atomic<bool> promptUi{false}, scriptedUi{false}, pressed{false};
     std::atomic<float> shakePan{0}, shakeTilt{0}, shakeRoll{0};   // current shake amplitudes, radians
+    VkRenderer::Lighting lighting;           // the time of day the city is drawn with (guarded by lock)
+    std::atomic<bool> lightingNew{true};
     double shotStart = -1;   // render-loop time the shot started playing at; < 0: held on frame 0
     bool shotPlaying = false;
     std::atomic<int> actorClip{-1};          // which clip the actor plays; -1: none (rest pose)
@@ -847,6 +850,7 @@ void driveShot(VkRenderer& r, double now) {
 }
 
 void renderLoop() {
+    g.lightingNew.store(true);   // a new renderer starts with default lighting
     VkRenderer r;
     if (!r.init(g.window)) {
         std::lock_guard<std::mutex> l(g.lock);
@@ -894,6 +898,10 @@ void renderLoop() {
                 g.chunkCount.store(r.chunkCount());
             }
             r.setCamera(target, yaw, pitch, distance);
+        }
+        if (g.lightingNew.exchange(false)) {
+            std::lock_guard<std::mutex> l(g.lock);
+            r.setLighting(g.lighting);
         }
         animateActor(r, now, dt);
         driveOpening(now, dt);
@@ -1315,6 +1323,8 @@ JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_hideWorld(JNIEnv*, jcla
     g.opening.reset();
     g.scriptedUi.store(false);
     g.coverUi.store(0);
+    g.lighting = VkRenderer::Lighting();
+    g.lightingNew.store(true);
     g.shot.reset();
     g.shotPlaying = false;
     g.gameOn.store(false);
@@ -1544,6 +1554,38 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_title(JNIEnv* env, j
                     for (int k = 0; k < 3; k++) sh->anchor[k] = anchor[k];
                     if (sh->skeleton.jointCount >= 4 && sh->clip.frames > 1) shot = sh;
                 }
+            }
+        }
+        // The opening is set before dawn: light, haze and background colour from that time of day. (Which time of
+        // day a checkpoint asks for is not decoded yet; this one is chosen because the opening's packs ship it.)
+        if (g.city) {
+            try {
+                const TimeOfDay tod = readTimeOfDay(*g.city, readScriptImage(*g.city), g.names, "predawn");
+                if (tod.found) {
+                    VkRenderer::Lighting L;
+                    for (int k = 0; k < 3; k++) {
+                        L.ambient[k] = tod.ambient[k];
+                        L.sun[k] = 0.35f * tod.sun[k];   // the game bakes most of the sun into the city; that data is not read yet
+                        L.toSun[k] = tod.toSun[k];
+                    }
+                    L.hazeStart = tod.hazeStart; L.hazeEnd = tod.hazeEnd; L.hazeMid = tod.hazeMid;
+                    PackRef sky;
+                    bool haveSky = false;
+                    {
+                        std::lock_guard<std::mutex> l(g.lock);
+                        haveSky = findPackNamed(tod.skyPack + ".xpp", &sky);
+                    }
+                    if (haveSky) {
+                        const std::vector<uint8_t> skyBytes = g.archives[sky.archive]->read(sky.entry);
+                        Pack skyPack(skyBytes);
+                        float c[3];
+                        if (averageCubeColor(skyPack, g.names, "haze", c)) for (int k = 0; k < 3; k++) L.haze[k] = L.background[k] = c[k];
+                    }
+                    std::lock_guard<std::mutex> l(g.lock);
+                    g.lighting = L;
+                    g.lightingNew.store(true);
+                }
+            } catch (const std::exception&) {
             }
         }
         if (!found) msg = "OK (opening checkpoint not found; starting at the city origin)";

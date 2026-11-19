@@ -6,10 +6,12 @@
 //   ina_tool city <archive holding EMPIRE.xpp> [out.obj] [oid_manifest.txt]             the far-away city and its hex cells
 //   ina_tool clips <archive> <pack> [oid_manifest.txt] [clip] [frame] [out.obj]         animation clips; one clip posed
 //   ina_tool anims <archive> <pack> <oid_manifest.txt> [name filter]                    named animations and their clips
+//   ina_tool tod <archive holding EMPIRE.xpp> <name> <oid_manifest.txt>                 a time of day's lighting
 //   ina_tool file <archive> <pack> <oid_manifest.txt> <file name> [out.obj]             one merged file's model
 //   ina_tool files <archive> <pack> <oid_manifest.txt>                                  files merged into a pack, meshes in each
 //   ina_tool props <archive> <pack> <oid_manifest.txt> [name filter]                    objects' property sets
 //   ina_tool script <archive> <pack> <oid_manifest.txt> <function> [seconds]            run a script function, print its requests
+#include <cmath>
 #include "anim/character_model.h"
 #include "anim/anim_set.h"
 #include "anim/character_loader.h"
@@ -21,6 +23,7 @@
 #include "assets/pack.h"
 #include "script/property_set.h"
 #include "world/spawn.h"
+#include "world/time_of_day.h"
 #include "script/script_host.h"
 #include "assets/psarc.h"
 #include "assets/texture.h"
@@ -404,6 +407,72 @@ int main(int argc, char** argv) {
                    skel.offset, skel.jointCount, skel.animatedJoints, legs.size(), clip.offset, clip.frames);
             return 0;
         }
+        if (cmd == "camera" && argc >= 7) {
+            // ina_tool camera <archive> <pack> <oid_manifest.txt> <animation node> <clip object> [step seconds]:
+            // a camera rig's path: time, eye (relative to its anchor), forward, up, field of view
+            const int idx = arc.find(argv[3]);
+            if (idx < 0) {
+                fprintf(stderr, "no pack named %s\n", argv[3]);
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            const auto names = loadNames(argv[4]);
+            const AnimSet set = readAnimSet(p, names);
+            const AnimNode* node = set.find(names, argv[5]);
+            uint32_t block = 0;
+            if (node)
+                for (uint32_t k : node->clipObjects) {
+                    const ClipObject& c = set.clips[k];
+                    if (!c.blocks.empty() && c.nameOid < names.size() && names[c.nameOid] == argv[6]) block = c.blocks[0].block;
+                }
+            if (!node || !block || !p.isPointer(size_t(node->offset) + 0x80)) {
+                fprintf(stderr, "animation node, clip or rig not found\n");
+                return 1;
+            }
+            const Skeleton skel = readSkeletonAt(p, p.word(size_t(node->offset) + 0x80));
+            const AnimClip clip = readClipAt(p, block);
+            const float step = argc > 7 ? float(atof(argv[7])) : 0.5f;
+            for (float t = 0; t <= clip.duration(); t += step) {
+                std::vector<float> pose = skel.restPose;
+                clip.evaluate(t * clip.fps, pose);
+                const std::vector<float> world = poseToWorld(skel, pose);
+                if (world.size() < 4 * 12) break;
+                const float* m = &world[12];
+                const float angle = 2.0f * std::atan2(std::fabs(pose[3 * 12 + 6]), std::fabs(pose[3 * 12 + 7]));
+                printf("%6.2f  eye %9.1f %9.1f %8.1f  forward %6.3f %6.3f %6.3f  up %6.3f %6.3f %6.3f  angle %.1f\n", t, m[3], m[7], m[11], m[0], m[4],
+                       m[8], m[2], m[6], m[10], angle * 57.2958f);
+            }
+            return 0;
+        }
+        if (cmd == "tod" && argc >= 5) {
+            // ina_tool tod <archive holding EMPIRE.xpp> <name> <oid_manifest.txt>: one time of day's lighting
+            const int idx = arc.find("EMPIRE.xpp");
+            if (idx < 0) {
+                fprintf(stderr, "no EMPIRE.xpp in this archive\n");
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            const auto names = loadNames(argv[4]);
+            const TimeOfDay t = readTimeOfDay(p, readScriptImage(p), names, argv[3]);
+            if (!t.found) {
+                fprintf(stderr, "no time of day named %s\n", argv[3]);
+                return 1;
+            }
+            printf("ambient %.2f %.2f %.2f, light %.2f %.2f %.2f towards %.2f %.2f %.2f\n", t.ambient[0], t.ambient[1], t.ambient[2], t.sun[0], t.sun[1],
+                   t.sun[2], t.toSun[0], t.toSun[1], t.toSun[2]);
+            printf("haze from %.0f to %.0f, %.2f half way; sky pack %s\n", t.hazeStart, t.hazeEnd, t.hazeMid, t.skyPack.c_str());
+            const int si = arc.find(t.skyPack + ".xpp");
+            if (si >= 0) {
+                const auto skyBytes = arc.read(size_t(si));
+                Pack sky(skyBytes);
+                float c[3];
+                if (averageCubeColor(sky, names, "haze", c)) printf("haze colour %.2f %.2f %.2f\n", c[0], c[1], c[2]);
+                if (averageCubeColor(sky, names, "cube_skybox", c)) printf("sky colour %.2f %.2f %.2f\n", c[0], c[1], c[2]);
+            }
+            return 0;
+        }
         if (cmd == "file" && argc >= 6) {
             // ina_tool file <archive> <pack> <oid_manifest.txt> <file name> [out.obj] [damage state]: one merged file's model
             const int idx = arc.find(argv[3]);
@@ -506,6 +575,7 @@ int main(int argc, char** argv) {
                     else if (q.type == 3) printf(" %g\n", q.v[0]);
                     else if (q.type == 4 || q.type == 5) printf(" %g %g %g %g\n", q.v[0], q.v[1], q.v[2], q.v[3]);
                     else if (q.type == 7) printf(" %s\n", host.name(q.raw).c_str());
+                    else if (scriptTypeSize(q.type) == 16) printf(" %g %g %g %g (type 0x%x)\n", q.v[0], q.v[1], q.v[2], q.v[3], q.type);
                     else printf(" 0x%x\n", q.raw);
                 }
             }

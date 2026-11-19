@@ -260,7 +260,7 @@ bool VkRenderer::init(ANativeWindow* window) {
 
     // Mesh pipeline: position + normal vertices, one matrix as a push constant, depth tested, two-sided.
     // vertex: the matrix; fragment: the draw mode (opaque, cutout, decal)
-    const VkPushConstantRange mpc[2] = {{VK_SHADER_STAGE_VERTEX_BIT, 0, 64}, {VK_SHADER_STAGE_FRAGMENT_BIT, 64, 4}};
+    const VkPushConstantRange mpc[2] = {{VK_SHADER_STAGE_VERTEX_BIT, 0, 64}, {VK_SHADER_STAGE_FRAGMENT_BIT, 64, 64}};
     VkPipelineLayoutCreateInfo mli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     mli.setLayoutCount = 1;
     mli.pSetLayouts = &setLayout_;
@@ -916,7 +916,7 @@ bool VkRenderer::drawFrame() {
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkBeginCommandBuffer(cmd_, &bi);
     VkClearValue clear[2] = {};
-    if (!chunks_.empty()) clear[0].color = {{0.36f, 0.45f, 0.58f, 1.0f}};
+    if (!chunks_.empty()) clear[0].color = {{lighting_.background[0], lighting_.background[1], lighting_.background[2], 1.0f}};
     else clear[0].color = {{0.05f, 0.05f, 0.07f, 1.0f}};
     clear[1].depthStencil = {1.0f, 0};
     VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -999,8 +999,10 @@ bool VkRenderer::drawFrame() {
         for (uint32_t pass = 0; pass < 3; pass++) {
             vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pass == 2 && decalPipeline_ ? decalPipeline_ : meshPipeline_);
             vkCmdPushConstants(cmd_, meshLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, m);
-            const int32_t mode = int32_t(pass);
-            vkCmdPushConstants(cmd_, meshLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 64, 4, &mode);
+            const Lighting& L = lighting_;
+            const float light[16] = {L.ambient[0], L.ambient[1], L.ambient[2], L.hazeStart, L.sun[0], L.sun[1], L.sun[2], L.hazeEnd,
+                                     L.toSun[0],   L.toSun[1],   L.toSun[2],   float(pass), L.haze[0], L.haze[1], L.haze[2], L.hazeMid};
+            vkCmdPushConstants(cmd_, meshLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 64, 64, light);
             for (const Chunk* ch : drawList) {
                 bool bound = false;
                 for (const ChunkBatch& b : ch->batches) {

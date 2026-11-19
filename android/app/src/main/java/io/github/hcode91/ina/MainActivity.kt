@@ -51,7 +51,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private var personNote = ""
     private var gameMode = false          // title view or play: the viewer controls are hidden
     private var playing = false           // the player character is under stick control
-    private lateinit var titleLayer: LinearLayout
+    private lateinit var titleLayer: FrameLayout
+    private lateinit var barsLayer: FrameLayout
     private lateinit var titleNote: TextView
     private lateinit var logoView: ImageView
     private lateinit var coverView: View
@@ -232,12 +233,21 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             setShadowLayer(6f, 0f, 0f, Color.BLACK)
             setPadding(0, 24, 0, 24)
         }
-        titleLayer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
+        // The opening is letterboxed: black bars top and bottom for as long as its script runs, with the prompt
+        // in the top bar and the logo over the bottom one, as on the game's title screen.
+        val barHeight = (resources.displayMetrics.heightPixels * 0.13f).toInt()
+        barsLayer = FrameLayout(this).apply {
             visibility = View.GONE
-            addView(logoView, LinearLayout.LayoutParams((resources.displayMetrics.widthPixels * 0.6f).toInt(), WRAP_CONTENT))
-            addView(titleNote, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            addView(View(this@MainActivity).apply { setBackgroundColor(Color.BLACK) }, FrameLayout.LayoutParams(MATCH_PARENT, barHeight, Gravity.TOP))
+            addView(View(this@MainActivity).apply { setBackgroundColor(Color.BLACK) }, FrameLayout.LayoutParams(MATCH_PARENT, barHeight, Gravity.BOTTOM))
+        }
+        root.addView(barsLayer, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        titleNote.textSize = 14f
+        titleNote.setPadding(0, 0, 0, 0)
+        titleLayer = FrameLayout(this).apply {
+            visibility = View.GONE
+            addView(titleNote, FrameLayout.LayoutParams(WRAP_CONTENT, barHeight, Gravity.TOP or Gravity.CENTER_HORIZONTAL))
+            addView(logoView, FrameLayout.LayoutParams(WRAP_CONTENT, (barHeight * 1.5f).toInt(), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
             setOnClickListener { startPlay() }
         }
         root.addView(titleLayer, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
@@ -272,6 +282,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                     val o = Native.opening()
                     coverView.setBackgroundColor(Color.rgb((o[3] * 255f).toInt().coerceIn(0, 255), (o[4] * 255f).toInt().coerceIn(0, 255), (o[5] * 255f).toInt().coerceIn(0, 255)))
                     coverView.alpha = o[0]
+                    barsLayer.visibility = if (o[2] > 0f) View.VISIBLE else View.GONE
                     if (o[2] > 0f && titleLayer.visibility == View.VISIBLE && titleNote.text.toString() == "Tap to start") {
                         val show = if (o[1] > 0f) View.VISIBLE else View.INVISIBLE
                         logoView.visibility = show
@@ -280,8 +291,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                         logoView.visibility = View.VISIBLE
                         titleNote.visibility = View.VISIBLE
                     }
-                } else if (coverView.alpha != 0f) {
-                    coverView.alpha = 0f
+                } else {
+                    if (coverView.alpha != 0f) coverView.alpha = 0f
+                    if (barsLayer.visibility != View.GONE) barsLayer.visibility = View.GONE
                 }
                 ui.postDelayed(this, 33)
             }

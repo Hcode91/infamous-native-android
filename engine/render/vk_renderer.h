@@ -51,6 +51,14 @@ public:
     // A free camera (eye, unit forward and up, vertical field of view in radians) instead of the orbit
     // camera; `on` false returns to the orbit camera.
     void setFreeCamera(bool on, const float eye[3] = nullptr, const float forward[3] = nullptr, const float up[3] = nullptr, float fovY = 1.0472f);
+    // Scene lighting for the city: ambient and directional light colours, the unit vector towards the light,
+    // haze colour with its start and end distances and its opacity half way, and the background colour.
+    struct Lighting {
+        float ambient[3] = {0.5f, 0.5f, 0.5f}, sun[3] = {0.6f, 0.6f, 0.6f}, toSun[3] = {0.35f, 0.45f, 0.82f};
+        float haze[3] = {0.36f, 0.45f, 0.58f}, hazeStart = 1e9f, hazeEnd = 2e9f, hazeMid = 0.5f;
+        float background[3] = {0.36f, 0.45f, 0.58f};
+    };
+    void setLighting(const Lighting& l) { lighting_ = l; }
     void removeChunk(uint32_t id);
     void setChunkVisible(uint32_t id, bool visible);
     void clearChunks();
@@ -131,6 +139,7 @@ private:
     std::map<uint64_t, SharedTexture> textures_;
     std::map<uint32_t, Chunk> chunks_;
     uint32_t nextChunk_ = 1;
+    Lighting lighting_;
     size_t drawnChunks_ = 0, drawnTriangles_ = 0;
     GpuTexture greyTexture_;
     VkSampler repeatSampler_ = VK_NULL_HANDLE;
