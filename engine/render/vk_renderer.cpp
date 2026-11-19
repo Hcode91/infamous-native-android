@@ -773,6 +773,17 @@ void VkRenderer::setCamera(const float target[3], float yaw, float pitch, float 
     camDist_ = distance;
 }
 
+void VkRenderer::setFreeCamera(bool on, const float eye[3], const float forward[3], const float up[3], float fovY) {
+    camFree_ = on && eye && forward && up;
+    if (!camFree_) return;
+    for (int k = 0; k < 3; k++) {
+        camEye_[k] = eye[k];
+        camForward_[k] = forward[k];
+        camUp_[k] = up[k];
+    }
+    camFov_ = std::min(std::max(fovY, 0.05f), 2.6f);
+}
+
 void VkRenderer::destroyTexture() {
     if (!dev_) return;
     if (textureView_) vkDestroyImageView(dev_, textureView_, nullptr);
@@ -923,17 +934,30 @@ bool VkRenderer::drawFrame() {
     if (!chunks_.empty()) {
         // Orbit camera, Z up. Column-major matrices: clip = proj * view * world.
         const float cp = std::cos(camPitch_), sp = std::sin(camPitch_);
-        const float eye[3] = {camTarget_[0] + camDist_ * cp * std::cos(camYaw_), camTarget_[1] + camDist_ * cp * std::sin(camYaw_),
-                              camTarget_[2] + camDist_ * sp};
+        float eye[3] = {camTarget_[0] + camDist_ * cp * std::cos(camYaw_), camTarget_[1] + camDist_ * cp * std::sin(camYaw_),
+                        camTarget_[2] + camDist_ * sp};
         float f[3] = {camTarget_[0] - eye[0], camTarget_[1] - eye[1], camTarget_[2] - eye[2]};
+        float upHint[3] = {0, 0, 1};
+        if (camFree_) {
+            for (int k = 0; k < 3; k++) {
+                eye[k] = camEye_[k];
+                f[k] = camForward_[k];
+                upHint[k] = camUp_[k];
+            }
+        }
         const float fl = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
         for (float& v : f) v /= fl;
-        float s[3] = {f[1], -f[0], 0.0f};   // forward x up(0,0,1)
-        const float sl = std::sqrt(s[0] * s[0] + s[1] * s[1]);
-        s[0] /= sl; s[1] /= sl;
+        // side = forward x up
+        float s[3] = {f[1] * upHint[2] - f[2] * upHint[1], f[2] * upHint[0] - f[0] * upHint[2], f[0] * upHint[1] - f[1] * upHint[0]};
+        float sl = std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
+        if (sl < 1e-6f) {   // looking straight along the up hint
+            s[0] = 1; s[1] = 0; s[2] = 0;
+            sl = 1;
+        }
+        for (float& v : s) v /= sl;
         const float u[3] = {s[1] * f[2] - s[2] * f[1], s[2] * f[0] - s[0] * f[2], s[0] * f[1] - s[1] * f[0]};
-        const float zn = std::max(0.05f, camDist_ * 0.01f), zf = std::max(camDist_ * 40.0f, 60000.0f);
-        const float t = 1.0f / std::tan(0.5f * 1.0472f);   // 60 degree vertical field of view
+        const float zn = camFree_ ? 10.0f : std::max(0.05f, camDist_ * 0.01f), zf = std::max(camDist_ * 40.0f, 60000.0f);
+        const float t = 1.0f / std::tan(0.5f * (camFree_ ? camFov_ : 1.0472f));   // orbit camera: 60 degrees vertical
         const float A = zf / (zn - zf), B = zn * zf / (zn - zf);
         // rows of the view matrix: s, u, -f; projection flips Y for Vulkan and maps depth to 0..1
         const float vr[3][4] = {{s[0], s[1], s[2], -(s[0] * eye[0] + s[1] * eye[1] + s[2] * eye[2])},

@@ -125,6 +125,18 @@ their stored rotations (the wrists do not track the hand targets, which seem to 
 Not handled: the root transform at 0x18 (movement of the whole character over the clip), partial clips
 layered over others, additive clips, blend nodes, float channels.
 
+## Camera rigs (decoded)
+
+Scripted shots are small joint hierarchies animated by ordinary clips. The opening mission's first shot
+(`anim_intro`, clip objects `init`, `start` of 15 s and `pull_back`) uses four joints: 0 root, 1 the
+camera (it looks along its +X with +Z up), 2 a child of the camera 150 m along +X (focus), 3 the field of
+view as a rotation about Z (51 degrees at rest; the clip moves it between 24 and 61). The node points at
+its hierarchy at +0x80. Positions are relative to the object named `camera_parent` in the same file of
+the pack (at -21000, -18000, 0), which puts the shot at street level beside the mission's first
+checkpoint and its `GUIDE_CAMERA_START` / `GUIDE_CAMERA_END` markers: the clip starts 2.4 m from the first
+marker's height and ends within 2 m of the second. Whether the angle is the horizontal or the vertical
+field of view is **not known**; this engine takes it as horizontal for a 16:9 picture.
+
 ## Tools
 
 - `ina_tool clips <archive> <pack> [oid_manifest.txt] [clip] [frame] [out.obj]` lists a pack's clips, or

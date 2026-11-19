@@ -48,6 +48,9 @@ public:
     bool updateChunkVertices(uint32_t id, const std::vector<float>& vertices);
     // Moves a chunk's culling box (for a chunk whose vertices are rewritten).
     void setChunkBox(uint32_t id, const float boxMin[3], const float boxMax[3]);
+    // A free camera (eye, unit forward and up, vertical field of view in radians) instead of the orbit
+    // camera; `on` false returns to the orbit camera.
+    void setFreeCamera(bool on, const float eye[3] = nullptr, const float forward[3] = nullptr, const float up[3] = nullptr, float fovY = 1.0472f);
     void removeChunk(uint32_t id);
     void setChunkVisible(uint32_t id, bool visible);
     void clearChunks();
@@ -133,6 +136,8 @@ private:
     VkSampler repeatSampler_ = VK_NULL_HANDLE;
     float camTarget_[3] = {0, 0, 0};
     float camYaw_ = 0.6f, camPitch_ = 0.5f, camDist_ = 100.0f;
+    bool camFree_ = false;
+    float camEye_[3] = {0, 0, 0}, camForward_[3] = {1, 0, 0}, camUp_[3] = {0, 0, 1}, camFov_ = 1.0472f;
     VkDescriptorPool descPool_ = VK_NULL_HANDLE;
     VkDescriptorSet set_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;

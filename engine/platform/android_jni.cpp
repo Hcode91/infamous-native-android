@@ -109,6 +109,17 @@ struct State {
     std::atomic<bool> gameOn{false};
     std::atomic<float> stickX{0}, stickY{0};
     float spawn[3] = {0, 0, 0};
+    // The opening shot: a camera rig (joint 1 = camera looking along +X, joint 3 = field of view as a
+    // rotation about Z) animated by a clip, relative to an anchor object. Held on its first frame for the
+    // title, played when play starts.
+    struct Shot {
+        Skeleton skeleton;
+        AnimClip clip;
+        float anchor[3] = {0, 0, 0};
+    };
+    std::shared_ptr<Shot> shot;
+    double shotStart = -1;   // render-loop time the shot started playing at; < 0: held on frame 0
+    bool shotPlaying = false;
     std::atomic<int> actorClip{-1};          // which clip the actor plays; -1: none (rest pose)
     std::vector<std::string> actorClipNotes; // one line per clip, for the status text
 
@@ -258,7 +269,8 @@ void blendPoses(std::vector<float>& a, const std::vector<float>& b, float t) {
 // The player: moves with the stick (relative to the camera), stays on the ground, runs or idles, and
 // takes the camera target along. There are no walls yet: only ledges up to head height stop him.
 void stepPlayer(VkRenderer& r, State::Actor& a, uint32_t chunk, float dt) {
-    const float sx = g.stickX.load(), sy = g.stickY.load();
+    const bool live = g.gameOn.load();   // not while the opening shot plays
+    const float sx = live ? g.stickX.load() : 0.0f, sy = live ? g.stickY.load() : 0.0f;
     const float mag = std::min(1.0f, std::sqrt(sx * sx + sy * sy));
     float yaw;
     std::shared_ptr<GroundGrid> ground;
@@ -316,6 +328,7 @@ void stepPlayer(VkRenderer& r, State::Actor& a, uint32_t chunk, float dt) {
     r.updateChunkVertices(chunk, a.vertices);
     const float lo[3] = {a.pos[0] - 250, a.pos[1] - 250, a.pos[2] - 100}, hi[3] = {a.pos[0] + 250, a.pos[1] + 250, a.pos[2] + 300};
     r.setChunkBox(chunk, lo, hi);
+    if (!live) return;
     std::lock_guard<std::mutex> l(g.lock);
     g.target[0] = a.pos[0];
     g.target[1] = a.pos[1];
@@ -342,6 +355,50 @@ void animateActor(VkRenderer& r, double seconds, float dt) {
     if (actor->vertices.size() != actor->model->scene().vertices.size()) actor->vertices = actor->model->scene().vertices;
     actor->model->skin(world, actor->vertices);
     r.updateChunkVertices(it->second[0], actor->vertices);
+}
+
+// The opening shot's camera: on its first frame while the title shows, then played through once; when it
+// ends the orbit camera and the stick take over.
+void driveShot(VkRenderer& r, double now) {
+    std::shared_ptr<State::Shot> shot;
+    double start;
+    bool playing;
+    {
+        std::lock_guard<std::mutex> l(g.lock);
+        shot = g.shot;
+        if (shot && g.shotPlaying && g.shotStart < 0) g.shotStart = now;
+        start = g.shotStart;
+        playing = g.shotPlaying;
+        if (!shot || !(g.titleOn || playing)) shot.reset();
+    }
+    if (!shot) {
+        r.setFreeCamera(false);
+        return;
+    }
+    float t = playing ? float(now - start) : 0.0f;
+    const float length = shot->clip.duration();
+    if (playing && t >= length) {
+        std::lock_guard<std::mutex> l(g.lock);
+        g.shotPlaying = false;
+        g.shotStart = -1;
+        g.gameOn.store(true);
+        r.setFreeCamera(false);
+        return;
+    }
+    std::vector<float> pose = shot->skeleton.restPose;
+    shot->clip.evaluate(t * shot->clip.fps, pose);
+    const std::vector<float> world = poseToWorld(shot->skeleton, pose);
+    if (shot->skeleton.jointCount < 4 || world.size() < 4 * 12) return;
+    const float* m = &world[12];
+    const float eye[3] = {m[3] + shot->anchor[0], m[7] + shot->anchor[1], m[11] + shot->anchor[2]};
+    const float forward[3] = {m[0], m[4], m[8]}, up[3] = {m[2], m[6], m[10]};
+    // the rig's angle is taken as the horizontal field of view of a 16:9 picture
+    const float angle = 2.0f * std::atan2(std::fabs(pose[3 * 12 + 6]), std::fabs(pose[3 * 12 + 7]));
+    const float fovY = 2.0f * std::atan(std::tan(0.5f * std::min(std::max(angle, 0.1f), 2.6f)) * 9.0f / 16.0f);
+    r.setFreeCamera(true, eye, forward, up, fovY);
+    std::lock_guard<std::mutex> l(g.lock);
+    if (!g.gameOn.load())   // keep the city loaded around the camera
+        for (int k = 0; k < 3; k++) g.target[k] = eye[k];
 }
 
 void renderLoop() {
@@ -380,7 +437,7 @@ void renderLoop() {
                     g.jobs.pop_front();
                     if (add) break;
                 }
-                if (g.titleOn) g.yaw += 0.06f * dt;   // the title view turns slowly
+                if (g.titleOn && !g.shot) g.yaw += 0.06f * dt;   // without the opening shot the title view turns slowly
                 target[0] = g.target[0]; target[1] = g.target[1]; target[2] = g.target[2];
                 yaw = g.yaw; pitch = g.pitch; distance = g.distance;
             }
@@ -394,6 +451,7 @@ void renderLoop() {
             r.setCamera(target, yaw, pitch, distance);
         }
         animateActor(r, now, dt);
+        driveShot(r, now);
         if (!r.drawFrame()) {
             std::lock_guard<std::mutex> l(g.lock);
             g.renderError = r.error();
@@ -800,6 +858,8 @@ JNIEXPORT void JNICALL Java_io_github_hcode91_ina_Native_hideWorld(JNIEnv*, jcla
     g.held.clear();
     g.characterShown = false;
     g.titleOn = false;
+    g.shot.reset();
+    g.shotPlaying = false;
     g.gameOn.store(false);
     g.actorClipNotes.clear();
     g.actorClip.store(-1);
@@ -981,12 +1041,45 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_title(JNIEnv* env, j
             if (g.sectors.empty() || !g.layout) return env->NewStringUTF("The city needs EMPIRE.xpp and oid_manifest.txt among the imported files");
             found = findPackNamed(kIntroPack, &ref);
         }
+        std::shared_ptr<State::Shot> shot;
         if (found) {
             const std::vector<uint8_t> bytes = g.archives[ref.archive]->read(ref.entry);
             Pack p(bytes);
             found = objectPosition(p, "warp_cp_prologue", at);
+            // the opening shot: the animation "anim_intro" (its clip object "start"), the joint hierarchy the
+            // node points at, and the anchor object "camera_parent" in the same file of the pack
+            const AnimSet set = readAnimSet(p, g.names);
+            if (const AnimNode* node = set.find(g.names, "anim_intro")) {
+                uint32_t block = 0;
+                for (uint32_t k : node->clipObjects) {
+                    const ClipObject& c = set.clips[k];
+                    if (!c.blocks.empty() && c.nameOid < g.names.size() && g.names[c.nameOid] == "start") block = c.blocks[0].block;
+                }
+                const auto range = subFileRange(p, node->offset);
+                float anchor[3] = {0, 0, 0};
+                bool anchored = false;
+                for (uint32_t o : p.objects()) {
+                    if (o < range.first || o >= range.second || size_t(o) + 0x70 > p.data().size()) continue;
+                    const uint32_t oid = p.word(size_t(o) + 0x0C);
+                    if (oid >= g.names.size() || g.names[oid] != "camera_parent") continue;
+                    for (int k = 0; k < 3; k++) {
+                        const uint32_t w = p.word(size_t(o) + 0x60 + size_t(k) * 4);
+                        memcpy(&anchor[k], &w, 4);
+                    }
+                    anchored = true;
+                    break;
+                }
+                if (block && anchored && p.isPointer(size_t(node->offset) + 0x80)) {
+                    auto sh = std::make_shared<State::Shot>();
+                    sh->skeleton = readSkeletonAt(p, p.word(size_t(node->offset) + 0x80));
+                    sh->clip = readClipAt(p, block);
+                    for (int k = 0; k < 3; k++) sh->anchor[k] = anchor[k];
+                    if (sh->skeleton.jointCount >= 4 && sh->clip.frames > 1) shot = sh;
+                }
+            }
         }
         if (!found) msg = "OK (opening checkpoint not found; starting at the city origin)";
+        else if (!shot) msg = "OK (opening camera not found; showing the checkpoint instead)";
         stopLoader();
         {
             std::lock_guard<std::mutex> l(g.lock);
@@ -998,6 +1091,9 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_title(JNIEnv* env, j
             g.worldOn = true;
             g.overview = false;
             g.titleOn = true;
+            g.shot = shot;
+            g.shotStart = -1;
+            g.shotPlaying = false;
             g.gameOn.store(false);
             g.characterShown = false;
             g.actorClipNotes.clear();
@@ -1131,7 +1227,9 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_startGame(JNIEnv* en
         std::lock_guard<std::mutex> l(g.lock);
         g.jobs.push_back(std::move(j));
         g.titleOn = false;
-        g.gameOn.store(true);
+        g.shotPlaying = g.shot != nullptr;   // the opening shot plays first; the stick takes over when it ends
+        g.shotStart = -1;
+        g.gameOn.store(!g.shotPlaying);
         g.stickX.store(0);
         g.stickY.store(0);
         g.distance = 420.0f;

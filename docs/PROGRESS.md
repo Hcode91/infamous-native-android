@@ -40,7 +40,7 @@ Last updated: 2026-11-19. Tested against the EU disc release (BCES00220).
 | Area | State |
 |---|---|
 | World viewer, streaming | Sectors load and unload as the camera moves; two fingers move the camera, which stays on the ground |
-| Title view and first play | On launch: the city around the opening mission's first checkpoint, turning slowly behind the game's logo (read from the user's files). A tap puts the player character there: left thumb moves him (idle and run clips, blended), right thumb turns the camera, he follows the collision ground and falls off edges. No walls, jumping, climbing, powers, enemies, sound or missions |
+| Title view and first play | On launch: the opening mission's first camera shot, held on its first frame behind the game's logo (both read from the user's files); a tap plays the 15-second shot, then hands over to the player. A tap puts the player character there: left thumb moves him (idle and run clips, blended), right thumb turns the camera, he follows the collision ground and falls off edges. No walls, jumping, climbing, powers, enemies, sound or missions |
 | World viewer, props | The cop's pistol rides in his right hand |
 | World viewer, whole city | Draws the far-away city on its own |
 
