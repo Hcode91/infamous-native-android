@@ -300,6 +300,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     /** The title view: the city turning slowly behind the game's logo. */
     private fun showTitle() {
+        if (titleLoading) return   // one title at a time: a second load restarts the opening under the player
+        titleLoading = true
         gameMode = true
         playing = false
         worldMode = false
@@ -325,6 +327,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                     }
                 }
                 titleNote.text = if (result.startsWith("OK")) "Tap to start" else result
+                titleLoading = false
             }
         }
     }
@@ -497,11 +500,17 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    private var openingArchives = false
+    private var titleLoading = false
+
     private fun openGame() {
+        if (openingArchives || opened) return   // a second request while the first is still running would start the title twice
+        openingArchives = true
         info.text = "Opening archives…"
         thread {
             val result = Native.open(gameDir.absolutePath)
             ui.post {
+                openingArchives = false
                 if (result.startsWith("OK")) {
                     opened = true
                     importButton.visibility = View.GONE
