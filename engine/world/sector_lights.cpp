@@ -4,9 +4,12 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <tuple>
 
 #include "assets/character_mesh.h"
 #include "script/property_set.h"
+#include "assets/world_mesh.h"
+#include "world/spawn.h"
 #include "world/time_of_day.h"
 
 namespace ina {
@@ -80,6 +83,82 @@ std::vector<WorldLight> readSectorLights(const Pack& pack, const ScriptImage& im
             out.push_back(l);
         }
     }
+    return out;
+}
+
+Scene buildSectorProps(const Pack& sector, const Pack* core, const std::vector<std::string>& names, const float offset[3],
+                       size_t* placed) {
+    struct Group { DrawMode mode; uint8_t layer; uint32_t texture; std::vector<float> vertices; std::vector<uint32_t> indices; };
+    std::map<std::tuple<int, int, uint32_t>, Group> groups;
+    std::map<uint32_t, Scene> models;   // by prototype name
+    size_t count = 0;
+    for (const SectorInstance& in : readSectorInstances(sector, names.size())) {
+        auto it = models.find(in.proxyOid);
+        if (it == models.end()) {
+            Scene model;
+            for (const Pack* pack : {&sector, core}) {
+                if (!pack) continue;
+                const uint32_t file = findProxyFile(*pack, names, names[in.proxyOid]);
+                if (!file) continue;
+                const auto range = subFileRange(*pack, file, kFileClass);
+                const auto meshes = readStaticMeshes(*pack, nullptr, nullptr, &names, range.first, range.second);
+                model = buildFileScene(*pack, meshes, file, 0);
+                break;
+            }
+            it = models.emplace(in.proxyOid, std::move(model)).first;
+        }
+        const Scene& model = it->second;
+        if (model.vertices.empty()) continue;
+        count++;
+        for (const SceneBatch& b : model.batches) {
+            Group& g = groups[{int(b.mode), int(b.layer), b.textureOid}];
+            g.mode = b.mode;
+            g.layer = b.layer;
+            g.texture = b.textureOid;
+            // copy the batch's vertices (each batch has its own run of them) moved to the entity's place
+            std::map<uint32_t, uint32_t> remap;
+            for (uint32_t i = 0; i < b.indexCount; i++) {
+                const uint32_t src = model.indices[b.firstIndex + i];
+                auto r = remap.find(src);
+                if (r == remap.end()) {
+                    const float* v = &model.vertices[size_t(src) * kVertexFloats];
+                    const uint32_t dst = uint32_t(g.vertices.size() / kVertexFloats);
+                    for (int row = 0; row < 3; row++)
+                        g.vertices.push_back(in.rotation[3 * row] * v[0] + in.rotation[3 * row + 1] * v[1] + in.rotation[3 * row + 2] * v[2] +
+                                             in.position[row] + offset[row]);
+                    for (int row = 0; row < 3; row++)
+                        g.vertices.push_back(in.rotation[3 * row] * v[3] + in.rotation[3 * row + 1] * v[4] + in.rotation[3 * row + 2] * v[5]);
+                    g.vertices.insert(g.vertices.end(), {v[6], v[7], 0.0f});
+                    r = remap.emplace(src, dst).first;
+                }
+                g.indices.push_back(r->second);
+            }
+        }
+    }
+    Scene out;
+    bool first = true;
+    for (auto& [key, g] : groups) {
+        const uint32_t base = uint32_t(out.vertices.size() / kVertexFloats);
+        SceneBatch b;
+        b.firstIndex = uint32_t(out.indices.size());
+        b.indexCount = uint32_t(g.indices.size());
+        b.textureOid = g.texture;
+        b.mode = g.mode;
+        b.layer = g.layer;
+        out.batches.push_back(b);
+        for (size_t v = 0; v + kVertexFloats <= g.vertices.size(); v += kVertexFloats) {
+            for (int c = 0; c < 3; c++) {
+                const float x = g.vertices[v + size_t(c)];
+                if (first || x < out.boxMin[c]) out.boxMin[c] = x;
+                if (first || x > out.boxMax[c]) out.boxMax[c] = x;
+            }
+            first = false;
+        }
+        out.vertices.insert(out.vertices.end(), g.vertices.begin(), g.vertices.end());
+        for (uint32_t i : g.indices) out.indices.push_back(base + i);
+    }
+    out.pieces = count;
+    if (placed) *placed = count;
     return out;
 }
 

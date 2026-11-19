@@ -146,3 +146,9 @@ of 0x70-byte records at +0xB0; piece mesh indices count through the +0xB0 table 
 ordinary mesh records plus 16 bytes, of which the word at +0x64 is a mask of the damage states the piece
 shows in (0 = always). State 0 is the intact car; on the sedan examined state 8 has broken windows and
 states 4 and 21 are wrecks. The top bit of a piece's first word marks the chassis and interior pieces.
+
+## Breakable props
+
+`CID_BreakableData` (bicycles, bins, benches, chairs) is laid out like a vehicle body without the body table:
+pieces at +0x90, transforms at +0x98, mesh records at +0xA8. A sector places them with its entity records
+(`lights.md`). Hydrants and blocker cars have no geometry of their own in their prototype.

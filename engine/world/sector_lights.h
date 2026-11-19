@@ -31,6 +31,11 @@ struct WorldLight {
 std::vector<WorldLight> readSectorLights(const Pack& pack, const ScriptImage& image, const std::vector<std::string>& names,
                                          const float offset[3]);
 
+// The models of the placed entities that have one (bicycles, bins, benches, lamps), as one scene in city
+// coordinates. A prototype is looked for in the sector's pack, then in `core`. `placed` counts the entities drawn.
+Scene buildSectorProps(const Pack& sector, const Pack* core, const std::vector<std::string>& names, const float offset[3],
+                       size_t* placed = nullptr);
+
 // Adds the lights to a scene's vertices (the ninth float of each).
 void lightScene(Scene& scene, const std::vector<WorldLight>& lights);
 

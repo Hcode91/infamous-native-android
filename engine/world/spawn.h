@@ -13,6 +13,7 @@ namespace ina {
 
 inline constexpr uint32_t kProxyFileClass = 0x228;   // ProxyFileData: start of a merged file
 inline constexpr uint32_t kProxySiteClass = 0x1CC;   // ProxySiteData: a place where a proxy can be spawned
+inline constexpr uint32_t kBreakableClass = 0x17D;   // BreakableData: a prop that can be knocked about, laid out like a vehicle body
 inline constexpr uint32_t kVehicleClass = 0x17F;     // VehicleData: a vehicle's body, with pieces like a static object
 
 // Offset of the merged file with this name, 0 when the pack has none.

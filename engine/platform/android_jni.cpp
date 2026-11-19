@@ -1043,7 +1043,13 @@ void loaderLoop() {
                     const HexCell* cell = g.layout->cell(w.sector);
                     const float zero[3] = {0, 0, 0};
                     j.chunks = buildSectorChunks(p, g.shared.get(), &g.names, w.level, cell ? cell->center : zero, 3);
-                    if (w.level == 0) {   // the sector's lamps, added to its vertices
+                    if (w.level == 0) {   // the sector's placed props (bicycles, bins, benches), then its lamps on every vertex
+                        try {
+                            Chunk props;
+                            props.scene = buildSectorProps(p, g.core.get(), g.names, cell ? cell->center : zero);
+                            if (!props.scene.vertices.empty()) j.chunks.push_back(std::move(props));
+                        } catch (const std::exception&) {
+                        }
                         try {
                             const auto lights = readSectorLights(p, readScriptImage(p), g.names, cell ? cell->center : zero);
                             for (Chunk& ch : j.chunks) lightScene(ch.scene, lights);

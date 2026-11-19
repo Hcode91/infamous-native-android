@@ -62,7 +62,7 @@ Scene buildFileScene(const Pack& pack, const std::vector<StaticMesh>& meshes, ui
     for (uint32_t obj : pack.objects()) {
         if (obj < range.first || obj >= range.second || size_t(obj) + 0xC0 > data.size()) continue;
         const uint32_t cls = pack.word(obj);
-        if (cls != kStaticObjectClass && cls != kVehicleClass) continue;
+        if (cls != kStaticObjectClass && cls != kVehicleClass && cls != kBreakableClass) continue;
         if (!pack.isPointer(size_t(obj) + 0x90) || !pack.isPointer(size_t(obj) + 0x98)) continue;
         const uint32_t pc = pack.word(size_t(obj) + 0x90), pieceCount = pack.word(size_t(obj) + 0x94);
         const uint32_t mats = pack.word(size_t(obj) + 0x98), matCount = pack.word(size_t(obj) + 0x9C);
@@ -73,7 +73,7 @@ Scene buildFileScene(const Pack& pack, const std::vector<StaticMesh>& meshes, ui
         float own[12];
         objectMatrix(pack, obj, own);
         // the file's root object (a vehicle body) is where the file is: its own placement is not applied
-        if (cls == kVehicleClass) { const float id[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}; memcpy(own, id, sizeof id); }
+        if (cls != kStaticObjectClass) { const float id[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}; memcpy(own, id, sizeof id); }
         for (uint32_t i = 0; i < pieceCount; i++) {
             const uint8_t* e = data.data() + pc + size_t(i) * 10;
             const uint32_t transform = uint32_t(e[2]) << 8 | e[3], field = uint32_t(e[4]) << 8 | e[5], index = field & 0x1FFF;

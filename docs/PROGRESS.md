@@ -82,3 +82,4 @@ objectives. That sequence is the opening mission's script, so the order is:
 
 - Sector entity placements decoded (0x4C-byte records); lights found inside the placed prototypes.
 - Vertices carry a ninth value, lamp light, computed when a sector is built. Host-verified on one sector (17 lights, park lamps at the lamp heads). Not yet seen on a device.
+- Placed props drawn from their prototypes (60 in the title's sector: bicycles, bins, benches, lamps). Host-verified counts only; not yet seen on a device.

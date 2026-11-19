@@ -293,6 +293,25 @@ int main(int argc, char** argv) {
                 }
                 totalTris += tris;
                 totalTex += tex.size();
+                if (w.level == 0) {
+                    size_t placed = 0;
+                    Chunk props;
+                    props.scene = buildSectorProps(p, &core, names, cell->center, &placed);
+                    printf("        %zu placed props drawn, %zu triangles in %zu batches\n", placed, props.scene.indices.size() / 3, props.scene.batches.size());
+                    if (!props.scene.vertices.empty()) chunks.push_back(std::move(props));
+                }
+                if (w.level == 0) {
+                    const auto lights = readSectorLights(p, readScriptImage(p), names, cell->center);
+                    size_t near = 0, lit = 0, verts = 0;
+                    for (const WorldLight& l : lights)
+                        if (std::hypot(l.position[0] - x, l.position[1] - y) < 3000.0f) near++;
+                    for (Chunk& ch : chunks) {
+                        lightScene(ch.scene, lights);
+                        for (size_t v = 0; v + kVertexFloats <= ch.scene.vertices.size(); v += kVertexFloats, verts++)
+                            if (ch.scene.vertices[v + 8] > 0) lit++;
+                    }
+                    printf("        %zu lights (%zu within 3000 of the point), %zu of %zu vertices lit\n", lights.size(), near, lit, verts);
+                }
                 printf("  %-5s level %u: %zu chunks, %zu triangles, %zu new textures, %zu pieces not decoded, %.0f ms\n", w.sector.c_str(),
                        w.level, chunks.size(), tris, tex.size(), missing,
                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count());
@@ -547,7 +566,7 @@ int main(int argc, char** argv) {
             const unsigned state = argc > 7 ? unsigned(atoi(argv[7])) : 0;
             const Scene scene = buildFileScene(p, meshes, file, state, &pieces);
             if (getenv("INA_FILE_DETAIL")) {   // every piece of the file's objects, placed or not
-                for (uint32_t cls : {kStaticObjectClass, kVehicleClass}) {
+                for (uint32_t cls : {kStaticObjectClass, kVehicleClass, kBreakableClass}) {
                     size_t missing = 0;
                     for (const MeshInstance& in : readMeshInstances(p, meshes, &missing, cls)) {
                         const StaticMesh& m = meshes[in.mesh];
