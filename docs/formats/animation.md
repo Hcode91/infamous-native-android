@@ -145,3 +145,10 @@ field of view is **not known**; this engine takes it as horizontal for a 16:9 pi
   clip objects, blocks, durations and root movement.
 - `ina_tool pose <archive> <pack> <oid_manifest.txt> <variant> <animation> <block index> <frame> <out.obj>`
   poses one variant in one frame of a named animation.
+
+## Clip events
+
+A clip object (class 0x229) can name moments of its clip: two lists, each a pointer and a count, at +0x1C
+and +0x24. Entries are 12 bytes: the moment as a fraction of the clip's length (float), a kind word (0x13
+in every entry seen) and a name. The opening shot's clip has six. The camera's script passes each one to
+the mission's label handler when the clip reaches it; `readAnimSet` returns them in `ClipObject::events`.

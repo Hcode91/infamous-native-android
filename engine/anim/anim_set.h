@@ -18,6 +18,9 @@ struct ClipObject {
     uint32_t offset = 0;
     uint32_t nameOid = 0;
     std::vector<ClipRef> blocks;   // in file order
+    // Named moments of the clip (fraction of its length, name), in time order. Scripts receive them as labels.
+    struct Event { float fraction = 0; uint32_t nameOid = 0; };
+    std::vector<Event> events;
 };
 
 struct AnimNode {

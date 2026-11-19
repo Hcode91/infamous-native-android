@@ -113,6 +113,9 @@ public:
     int findClassWithFunction(uint32_t nameOid) const;
 
     ScriptThread* spawn(uint32_t code, ScriptScope* scope);
+    // Starts a script function on a new thread with arguments: `args` are the argument bytes as the caller
+    // would have pushed them (big-endian, in order).
+    ScriptThread* call(uint32_t code, ScriptScope* scope, std::span<const uint8_t> args);
     void retract(uint32_t threadId);
     bool finished(uint32_t threadId) const;
     // Runs every thread that is due. `now` is in seconds and only moves forward.
@@ -124,6 +127,9 @@ public:
     uint32_t globalName(uint32_t value) const;       // name of a global object value, 0 when it is not one
     size_t liveThreads() const;
     uint32_t unknownInstructions() const { return unknown_; }
+    // Threads stopped because they ran outside what the machine can execute, and where the last one stopped.
+    uint32_t faults() const { return faults_; }
+    uint32_t lastFault() const { return lastFault_; }
     uint32_t word(uint32_t offset) const;
     ScriptScope* scopeById(uint32_t id);
 
@@ -139,7 +145,7 @@ private:
     std::vector<std::unique_ptr<ScriptThread>> threads_;
     std::vector<ScriptScope*> instances_;
     double now_ = 0, frameTime_ = 1.0 / 30.0;
-    uint32_t handles_ = 0, unknown_ = 0, threadIds_ = 0;
+    uint32_t handles_ = 0, unknown_ = 0, threadIds_ = 0, faults_ = 0, lastFault_ = 0;
 };
 
 // Size and alignment in bytes of a script value type.

@@ -117,6 +117,8 @@ struct State {
         Skeleton skeleton;
         AnimClip clip;
         float anchor[3] = {0, 0, 0};
+        std::vector<ClipObject::Event> events;   // the clip's named moments, delivered to the script as labels
+        size_t nextEvent = 0;
     };
     std::shared_ptr<Shot> shot;
     // The opening as the game's own script runs it: the mission's entry function executes in the script
@@ -128,11 +130,18 @@ struct State {
         float fade = 1.0f, fadeTarget = 1.0f, fadeRate = 0.0f;   // black cover, 0 clear .. 1 black
         bool cameraDone = false;
         uint32_t mainThread = 0;
+        int missionClass = -1;
+        std::vector<uint32_t> labels;                          // names of clip moments waiting to be delivered
+        // Camera shake as the script sets it up: a jolt source parented to the camera with angular amplitudes
+        // and a radius, and the script moves the source nearer (stronger) or farther (weaker).
+        bool joltOn = false;
+        float joltPan = 0, joltTilt = 0, joltRoll = 0, joltRadius = 1000.0f, joltStrength = 0;
         std::vector<std::string> unhandled;                    // what the script asked for that is not implemented
     };
     std::shared_ptr<Opening> opening;
     std::atomic<float> coverUi{0};           // for the app's black cover and prompt
     std::atomic<bool> promptUi{false}, scriptedUi{false}, pressed{false};
+    std::atomic<float> shakePan{0}, shakeTilt{0}, shakeRoll{0};   // current shake amplitudes, radians
     double shotStart = -1;   // render-loop time the shot started playing at; < 0: held on frame 0
     bool shotPlaying = false;
     std::atomic<int> actorClip{-1};          // which clip the actor plays; -1: none (rest pose)
@@ -390,12 +399,33 @@ void driveOpening(double now, float dt) {
         uint32_t fn = 0;
         for (uint32_t i = 0; i < g.names.size(); i++) if (g.names[i] == "RunCheckpointPrologue") fn = i;
         const int cls = vm.findClassWithFunction(fn);
+        o->missionClass = cls;
         if (cls >= 0) {
             ScriptScope* self = vm.instance(size_t(cls));
             if (const uint32_t code = vm.findFunction(size_t(cls), fn)) o->mainThread = vm.spawn(code, self)->id;
         }
     }
+    // Moments of the camera clip reach the mission as calls to its label handler.
+    std::vector<uint32_t> labels;
+    {
+        std::lock_guard<std::mutex> l(g.lock);
+        labels.swap(o->labels);
+    }
+    if (!labels.empty() && o->missionClass >= 0) {
+        uint32_t handler = 0;
+        for (uint32_t i = 0; i < g.names.size(); i++) if (g.names[i] == "OnLabel") handler = i;
+        if (const uint32_t code = o->vm->findFunction(size_t(o->missionClass), handler)) {
+            for (uint32_t label : labels) {
+                const uint8_t arg[4] = {uint8_t(label >> 24), uint8_t(label >> 16), uint8_t(label >> 8), uint8_t(label)};
+                o->vm->call(code, o->vm->instance(size_t(o->missionClass)), arg);
+            }
+        }
+    }
     o->vm->update(now, dt);
+    const float shake = o->joltOn ? o->joltStrength : 0.0f;
+    g.shakePan.store(o->joltPan * shake);
+    g.shakeTilt.store(o->joltTilt * shake);
+    g.shakeRoll.store(o->joltRoll * shake);
     if (o->fade != o->fadeTarget) {
         const float step = o->fadeRate * dt;
         o->fade = o->fade < o->fadeTarget ? std::min(o->fadeTarget, o->fade + step) : std::max(o->fadeTarget, o->fade - step);
@@ -412,6 +442,7 @@ void driveOpening(double now, float dt) {
         g.promptUi.store(false);
         g.coverUi.store(0);
         g.scriptedUi.store(false);
+        g.shakePan.store(0); g.shakeTilt.store(0); g.shakeRoll.store(0);
         g.gameOn.store(true);
     }
 }
@@ -460,6 +491,30 @@ std::shared_ptr<State::Opening> makeOpening(const Pack& p) {
         }
         return member == "SetCallbackObject";   // labels are not delivered yet
     };
+    o->host->onFunction = [op](ScriptCall& c, const std::string& fn) {
+        if (fn == "JoltidStartJolt" && c.args.size() >= 72) {
+            // result slot, kind, source object, ..., pan, tilt and roll amplitudes at words 11-13, radius at 17
+            const float pan = c.argFloat(11), tilt = c.argFloat(12), roll = c.argFloat(13), radius = c.argFloat(17);
+            if (!(pan >= 0 && pan < 1 && tilt >= 0 && tilt < 1 && roll >= 0 && roll < 1 && radius > 1)) return false;
+            op->joltPan = pan; op->joltTilt = tilt; op->joltRoll = roll; op->joltRadius = radius;
+            op->joltOn = true;
+            c.resultWord(c.machine->newHandle());
+            return true;
+        }
+        if (fn == "StopJolt") { op->joltOn = false; return true; }
+        return false;
+    };
+    o->host->onProperty = [op](ScriptCall& c, const std::string& object, const std::string& member) {
+        if (!c.isSet || object != "xo_camera_jolt" || member != "Xo.POS_LOCAL") return false;
+        float v[3];
+        for (int k = 0; k < 3; k++) {
+            const uint32_t w = uint32_t(c.value[4 * k]) << 24 | uint32_t(c.value[4 * k + 1]) << 16 | uint32_t(c.value[4 * k + 2]) << 8 | c.value[4 * k + 3];
+            memcpy(&v[k], &w, 4);
+        }
+        const float d = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        op->joltStrength = std::clamp(1.0f - d / op->joltRadius, 0.0f, 1.0f);
+        return true;
+    };
     o->host->onUnhandled = [op](const std::string& s) {
         if (op->unhandled.size() < 400) op->unhandled.push_back(s);
     };
@@ -505,13 +560,38 @@ void driveShot(VkRenderer& r, double now) {
     } else if (!playing && scriptedDone) {
         t = length - 1.0f / shot->clip.fps;
     }
+    if (playing && scripted) {
+        std::lock_guard<std::mutex> l(g.lock);
+        while (shot->nextEvent < shot->events.size() && shot->events[shot->nextEvent].fraction * length <= t) {
+            if (g.opening) g.opening->labels.push_back(shot->events[shot->nextEvent].nameOid);
+            shot->nextEvent++;
+        }
+    }
     std::vector<float> pose = shot->skeleton.restPose;
     shot->clip.evaluate(t * shot->clip.fps, pose);
     const std::vector<float> world = poseToWorld(shot->skeleton, pose);
     if (shot->skeleton.jointCount < 4 || world.size() < 4 * 12) return;
     const float* m = &world[12];
     const float eye[3] = {m[3] + shot->anchor[0], m[7] + shot->anchor[1], m[11] + shot->anchor[2]};
-    const float forward[3] = {m[0], m[4], m[8]}, up[3] = {m[2], m[6], m[10]};
+    float forward[3] = {m[0], m[4], m[8]}, up[3] = {m[2], m[6], m[10]};
+    {
+        // Camera shake: the amplitudes are the script's; the waveform is this engine's own (two sines per axis).
+        const float aPan = g.shakePan.load(), aTilt = g.shakeTilt.load(), aRoll = g.shakeRoll.load();
+        if (aPan != 0 || aTilt != 0 || aRoll != 0) {
+            const float s = float(now);
+            auto wave = [s](float f, float ph) { return 0.6f * std::sin(6.2832f * f * s + ph) + 0.4f * std::sin(6.2832f * f * 1.73f * s + 2.0f * ph); };
+            const float pan = aPan * wave(9.0f, 0.3f), tilt = aTilt * wave(11.0f, 1.7f), roll = aRoll * wave(7.0f, 2.9f);
+            const float right[3] = {forward[1] * up[2] - forward[2] * up[1], forward[2] * up[0] - forward[0] * up[2], forward[0] * up[1] - forward[1] * up[0]};
+            for (int k = 0; k < 3; k++) {
+                const float f0 = forward[k], u0 = up[k];
+                forward[k] = f0 + right[k] * pan + u0 * tilt;
+                up[k] = u0 - f0 * tilt + right[k] * roll;
+            }
+            const float fl = std::sqrt(forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]);
+            const float ul = std::sqrt(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
+            for (int k = 0; k < 3; k++) { forward[k] /= fl; up[k] /= ul; }
+        }
+    }
     // the rig's angle is taken as the horizontal field of view of a 16:9 picture
     const float angle = 2.0f * std::atan2(std::fabs(pose[3 * 12 + 6]), std::fabs(pose[3 * 12 + 7]));
     const float fovY = 2.0f * std::atan(std::tan(0.5f * std::min(std::max(angle, 0.1f), 2.6f)) * 9.0f / 16.0f);
@@ -1181,9 +1261,13 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_title(JNIEnv* env, j
             const AnimSet set = readAnimSet(p, g.names);
             if (const AnimNode* node = set.find(g.names, "anim_intro")) {
                 uint32_t block = 0;
+                std::vector<ClipObject::Event> events;
                 for (uint32_t k : node->clipObjects) {
                     const ClipObject& c = set.clips[k];
-                    if (!c.blocks.empty() && c.nameOid < g.names.size() && g.names[c.nameOid] == "start") block = c.blocks[0].block;
+                    if (!c.blocks.empty() && c.nameOid < g.names.size() && g.names[c.nameOid] == "start") {
+                        block = c.blocks[0].block;
+                        events = c.events;
+                    }
                 }
                 const auto range = subFileRange(p, node->offset);
                 float anchor[3] = {0, 0, 0};
@@ -1203,6 +1287,7 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_title(JNIEnv* env, j
                     auto sh = std::make_shared<State::Shot>();
                     sh->skeleton = readSkeletonAt(p, p.word(size_t(node->offset) + 0x80));
                     sh->clip = readClipAt(p, block);
+                    sh->events = events;
                     for (int k = 0; k < 3; k++) sh->anchor[k] = anchor[k];
                     if (sh->skeleton.jointCount >= 4 && sh->clip.frames > 1) shot = sh;
                 }

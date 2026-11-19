@@ -42,6 +42,14 @@ AnimSet readAnimSet(const Pack& pack, const std::vector<std::string>& names) {
         ClipObject c;
         c.offset = o;
         c.nameOid = pack.word(o + 0x0C);
+        // Event lists: (pointer, count) at +0x1C and at +0x24; entries are (fraction, kind, name).
+        for (uint32_t field : {0x1Cu, 0x24u}) {
+            if (size_t(o) + field + 8 > data.size() || !pack.isPointer(o + field)) continue;
+            const uint32_t at = pack.word(o + field), count = pack.word(o + field + 4);
+            if (count > 256 || uint64_t(at) + 12ull * count > data.size()) continue;
+            for (uint32_t k = 0; k < count; k++) c.events.push_back({f32at(pack, at + 12 * k), pack.word(at + 12 * k + 8)});
+        }
+        std::sort(c.events.begin(), c.events.end(), [](const ClipObject::Event& a, const ClipObject::Event& b) { return a.fraction < b.fraction; });
         if (pack.isPointer(o + 0x34)) starts.push_back({pack.word(o + 0x34), set.clips.size()});
         byOffset.push_back({o, set.clips.size()});
         set.clips.push_back(c);

@@ -387,7 +387,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (cmd == "script" && argc >= 6) {
-            // ina_tool script <archive> <pack> <oid_manifest.txt> <function> [seconds]: runs one script function with
+            // ina_tool script <archive> <pack> <oid_manifest.txt> <function> [seconds] [name argument]: runs one script function with
             // no engine behind it and prints what the script asks for, in time order
             const int idx = arc.find(argv[3]);
             if (idx < 0) {
@@ -412,7 +412,7 @@ int main(int argc, char** argv) {
             host.onUnhandled = [&](const std::string& s) {
                 std::string key;
                 for (char ch : s) if (!(ch >= '0' && ch <= '9') && ch != '.' && ch != '-') key += ch;
-                if (std::find(recent.begin(), recent.end(), key) != recent.end()) return;
+                if (!getenv("INA_SCRIPT_ALL") && std::find(recent.begin(), recent.end(), key) != recent.end()) return;
                 recent.push_back(key);
                 if (recent.size() > 6) recent.erase(recent.begin());
                 printf("%7.2f  %s\n", now, s.c_str());
@@ -425,10 +425,18 @@ int main(int argc, char** argv) {
             ScriptScope* self = vm.instance(size_t(cls));
             const uint32_t code = vm.findFunction(size_t(cls), fnOid);
             printf("class %d (record 0x%x): %s at 0x%x\n", cls, vm.image().classes[size_t(cls)].record, argv[5], code);
-            vm.spawn(code, self);
+            if (argc > 7) {   // one name argument, e.g. a label
+                uint32_t arg = 0;
+                for (uint32_t i = 0; i < names.size(); i++) if (names[i] == argv[7]) arg = i;
+                const uint8_t bytes4[4] = {uint8_t(arg >> 24), uint8_t(arg >> 16), uint8_t(arg >> 8), uint8_t(arg)};
+                vm.call(code, self, bytes4);
+            } else {
+                vm.spawn(code, self);
+            }
             const double end = argc > 6 ? atof(argv[6]) : 60.0;
             for (; now < end && vm.liveThreads(); now += 1.0 / 30.0) vm.update(now, 1.0 / 30.0);
-            printf("%7.2f  end: %zu threads still running, %u instructions skipped as unknown\n", now, vm.liveThreads(), vm.unknownInstructions());
+            printf("%7.2f  end: %zu threads still running, %u instructions skipped as unknown, %u threads faulted (last at 0x%x)\n", now,
+                   vm.liveThreads(), vm.unknownInstructions(), vm.faults(), vm.lastFault());
             return 0;
         }
         if (cmd == "anims" && argc >= 5) {

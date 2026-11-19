@@ -17,6 +17,8 @@ float rdf(const uint8_t* p) { const uint32_t v = rd(p); float f; memcpy(&f, &v, 
 void wrf(uint8_t* p, float f) { uint32_t v; memcpy(&v, &f, 4); wr(p, v); }
 uint32_t up(uint32_t x, uint32_t a) { return (x + a - 1) & ~(a - 1); }
 
+constexpr uint32_t kNoReturn = 0xFFFFFFFFu;
+
 bool isReference(uint32_t type) { return (type & 0x8000) != 0 || ((type >> 12) & 3) != 0; }
 
 }  // namespace
@@ -188,6 +190,16 @@ ScriptThread* ScriptMachine::spawn(uint32_t code, ScriptScope* scope) {
     return threads_.back().get();
 }
 
+ScriptThread* ScriptMachine::call(uint32_t code, ScriptScope* scope, std::span<const uint8_t> args) {
+    ScriptThread* t = spawn(code, scope);
+    const size_t n = std::min<size_t>(args.size(), 0x1000);
+    if (n) memcpy(t->stack.data() + t->sp, args.data(), n);
+    t->sp += uint32_t((n + 3) & ~size_t(3));
+    // A frame whose return address is "nowhere": returning through it ends the thread.
+    t->frames.push_back({kNoReturn, scope, t->sp, t->fp});
+    return t;
+}
+
 void ScriptMachine::retract(uint32_t id) {
     for (auto& t : threads_) if (t->id == id) t->done = true;
 }
@@ -222,7 +234,7 @@ void ScriptMachine::update(double now, double frameTime) {
         t.yielded = false;
         int n = 0;
         for (; n < 200000 && !t.done && !t.yielded; n++) step(t);
-        if (n >= 200000) t.done = t.faulted = true;   // a script that never yields
+        if (n >= 200000) { t.done = t.faulted = true; faults_++; lastFault_ = t.pc; }   // a script that never yields
     }
     threads_.erase(std::remove_if(threads_.begin(), threads_.end(), [](const auto& t) { return t->done; }), threads_.end());
 }
@@ -250,7 +262,7 @@ void ScriptMachine::engineCall(ScriptThread& t, uint32_t at, uint8_t op, uint8_t
 
 void ScriptMachine::step(ScriptThread& t) {
     const uint32_t a = t.pc;
-    if (uint64_t(a) + 4 > image_.data.size() || t.sp < 0x40 || t.sp + 0x200 > t.stack.size()) { t.done = t.faulted = true; return; }
+    if (uint64_t(a) + 4 > image_.data.size() || t.sp < 0x40 || t.sp + 0x200 > t.stack.size()) { t.done = t.faulted = true; faults_++; lastFault_ = a; return; }
     const uint32_t w = word(a);
     const uint8_t op = uint8_t(w >> 24), b1 = uint8_t(w >> 16), b2 = uint8_t(w >> 8), b3 = uint8_t(w);
     const uint32_t b23 = w & 0xFFFF;
@@ -260,7 +272,7 @@ void ScriptMachine::step(ScriptThread& t) {
     auto target = [&] { return a + uint32_t((int32_t(int16_t(b23)) / 4) * 4); };
     auto scopeAt = [&](unsigned depth) { ScriptScope* e = t.scope; while (depth-- && e) e = e->parent; return e; };
     auto fits = [](const ScriptScope* e, uint32_t off, uint32_t n) { return e && uint64_t(off) + n <= e->data.size(); };
-    auto fault = [&] { t.done = t.faulted = true; };
+    auto fault = [&] { t.done = t.faulted = true; faults_++; lastFault_ = a; };
 
     switch (op) {
         case 0x00: case 0x89: case 0x8A: case 0xA4: break;
@@ -316,8 +328,11 @@ void ScriptMachine::step(ScriptThread& t) {
         case 0x1F: if (t.scope) t.scope = t.scope->parent; break;
         case 0x21: if (t.scope && t.scope->data.size() < size_t(b23) + 64) t.scope->data.resize(size_t(b23) + 64, 0); break;
         case 0x22: t.sp = sp - b1; break;
-        case 0x2A: case 0x2B: case 0x2C: case 0x2D: {   // property get / set
-            next += 8;
+        // Property set (23, 26, 2A, 2C) and get (24, 25, 2B, 2D): the object pointer and the value, aligned to
+        // its type, sit in the top b1 bytes. The 2x forms carry two more words than the others.
+        case 0x23: case 0x24: case 0x25: case 0x26: case 0x2A: case 0x2B: case 0x2C: case 0x2D: {
+            next += op >= 0x2A ? 16 : 12;
+            if (sp < uint32_t(b1) + 0x40) return fault();
             ScriptCall c;
             c.machine = this;
             c.thread = &t;
@@ -325,7 +340,7 @@ void ScriptMachine::step(ScriptThread& t) {
             c.object = rd(M + base);
             c.value = M + up(base + 4, scriptTypeAlign(b23));
             c.type = b23;
-            c.isSet = op == 0x2B || op == 0x2D;
+            c.isSet = op == 0x23 || op == 0x26 || op == 0x2A || op == 0x2C;
             const auto it = image_.links.find(a);
             if (it != image_.links.end()) c.link = it->second;
             c.link.kind = ScriptLink::Property;
@@ -370,6 +385,7 @@ void ScriptMachine::step(ScriptThread& t) {
             t.frames.pop_back();
             if (b2 && f.sp >= b1) memmove(M + f.sp - b1, M + sp - b2, b2);
             t.pc = f.pc; t.scope = f.scope; t.sp = f.sp; t.fp = f.fp;
+            if (f.pc == kNoReturn) t.done = true;
             return;
         }
         case 0x41: if (!t.frames.empty() && M[t.frames.back().sp - b1]) next = target(); break;
@@ -512,9 +528,9 @@ void ScriptMachine::step(ScriptThread& t) {
         case 0xB3: case 0xB4: next += op == 0xB3 ? 8 : 16; memset(M + sp - b1, 0, scriptTypeSize(b23)); break;
         default:
             unknown_++;   // an instruction this machine does not implement yet: skipped
-            if (op == 0x23 || op == 0x24 || op == 0x25 || op == 0x26 || op == 0x27 || op == 0x28 || op == 0x29 || op == 0x2E || op == 0x2F ||
-                op == 0x31 || op == 0x32) next += 4;
-            else if (op == 0x30 || op == 0x33) next += 8;
+            if (op == 0x27 || op == 0x28 || op == 0x29) next += 4;
+            else if (op == 0x2E || op == 0x2F || op == 0x31 || op == 0x32) next += 12;
+            else if (op == 0x30 || op == 0x33) next += 16;
             break;
     }
     t.pc = next;

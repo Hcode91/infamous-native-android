@@ -62,7 +62,7 @@ type). Pushing a constant first aligns the stack to the constant's alignment.
 | 1D | 2 | function entry: new scope of `b2b3` bytes under the current one, new stack frame |
 | 1E / 1F | 1 / 0 | open / close a nested scope |
 | 22 | | value bookkeeping (reference counts in the original); pops `b1` |
-| 2A, 2C / 2B, 2D | 2 | get / set a property: object pointer and value sit in the top `b1` bytes |
+| 23, 26, 2A, 2C / 24, 25, 2B, 2D | 3 (2x: 4) | set / get a property: object pointer and value sit in the top `b1` bytes |
 | 34-36 / 38, 39 | 1 (+1 zero) | engine method / engine function: result slot and arguments are the top `b1` bytes |
 | 37 | 2 (name, 0) | call a script method by name on the object at the top |
 | 3A / 3B / 3D | | pop / reserve / zero `b1` bytes |
@@ -97,8 +97,8 @@ owning object; running the initialisation block in a fresh scope binds the class
 member variables.
 
 **Not implemented yet:** object creation (A6), list concatenation and search (97, 99), random element
-(9C), string building (9E), member access through an object pointer (A7-AF), the property forms 23-33
-other than 2A-2D, matrix arithmetic. Object lists are returned empty. Scopes are never freed. Engine
+(9C), string building (9E), member access through an object pointer (A7-AF), the property forms 27-33,
+matrix arithmetic. Object lists are returned empty. Scopes are never freed. Engine
 functions other than threads, sleeping and time are not implemented: the opening needs fades, the title
 prompt, the cameras, sound, time of day, spawning and the rest (see docs/PROGRESS.md).
 

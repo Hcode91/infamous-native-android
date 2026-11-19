@@ -100,7 +100,10 @@ void BasicScriptHost::property(ScriptCall& c) {
                 v += (v.empty() ? "" : " ") + describe(*c.machine, uint32_t(c.value[k]) << 24 | uint32_t(c.value[k + 1]) << 16 | uint32_t(c.value[k + 2]) << 8 | c.value[k + 3]);
             onUnhandled("set " + (obj.empty() ? describe(*c.machine, c.object) : obj) + " " + member + " = " + v);
         }
-    } else if (!(c.type & 0x8000) && ((c.type >> 12) & 3)) {
+    } else {
+        // A value nobody supplies reads as zero; an object reads as a placeholder so scripts that test it carry on.
+        memset(c.value, 0, scriptTypeSize(c.type));
+        if ((c.type & 0x8000) || !((c.type >> 12) & 3)) return;
         const uint32_t h = c.machine->newHandle();
         c.value[0] = uint8_t(h >> 24); c.value[1] = uint8_t(h >> 16); c.value[2] = uint8_t(h >> 8); c.value[3] = uint8_t(h);
     }
