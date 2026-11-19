@@ -129,3 +129,20 @@ See [world-geometry.md](world-geometry.md).
 - The layout of every other object class: materials, skeletons, animations, collision, world sectors,
   scripts.
 - The cube map face order.
+
+## Merged files, spawn sites and vehicle bodies
+
+A pack can hold many files merged together; each starts at a `ProxyFileData` object (class 0x228) and runs
+to the next one. `ina_tool files` lists them with their meshes; `ina_tool file` assembles one.
+
+A spawn site (`ProxySiteData`, class 0x1CC) is placed like any object and names what it spawns: +0x90 the
+proxy (a merged file, usually in `core.xpp`), +0x94 and +0x98 the names of its merged geometry and physics
+(empty marker files in a mission pack).
+
+Inside a merged file, static objects are placed relative to the file's root, so an object's own scale,
+rotation and position apply to its pieces (a car's wheel hubs). A vehicle body (`VehicleData`, class 0x17F)
+has the usual piece and transform tables at +0x90 and +0x98, a record table at +0xA8, and a second table
+of 0x70-byte records at +0xB0; piece mesh indices count through the +0xB0 table first. Those records are
+ordinary mesh records plus 16 bytes, of which the word at +0x64 is a mask of the damage states the piece
+shows in (0 = always). State 0 is the intact car; on the sedan examined state 8 has broken windows and
+states 4 and 21 are wrecks. The top bit of a piece's first word marks the chassis and interior pieces.

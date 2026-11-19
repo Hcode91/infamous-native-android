@@ -37,6 +37,7 @@
 #include "script/script_host.h"
 #include "world/city_stream.h"
 #include "world/scene.h"
+#include "world/spawn.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "ina", __VA_ARGS__)
 
@@ -132,6 +133,25 @@ struct State {
         bool cameraDone = false;
         uint32_t mainThread = 0;
         int missionClass = -1;
+        // Things the script can spawn and throw about. A model is one merged file of the core pack, built
+        // once (intact and wrecked); a prop is one spawned copy with its own chunk, moved every frame.
+        struct Model { Chunk intact, wreck; };
+        struct Placement { float pos[3] = {0, 0, 0}; float q[4] = {0, 0, 0, 1}; };
+        struct Prop {
+            std::string key;                  // its chunk's name in the renderer
+            const Model* model = nullptr;
+            bool wrecked = false, moving = false, uploaded = false;
+            Placement at;
+            float vel[3] = {0, 0, 0}, gravity[3] = {0, 0, 0}, spin[3] = {0, 0, 0}, floor = -1e9f;
+            bool thrown = false;              // launched at a target: it stops there (there is no ground to hit)
+            float target[3] = {0, 0, 0};
+            std::vector<float> vertices;
+        };
+        std::map<std::string, Model> models;                   // by proxy name
+        std::map<std::string, std::string> siteProxy;          // spawn site name -> proxy name
+        std::map<std::string, Placement> placed;               // named objects of the pack, and where they are
+        std::map<uint32_t, Prop> props;                        // by script handle
+        std::deque<std::vector<std::pair<uint64_t, TextureImage>>> modelTextures;   // handed to the renderer when the title starts
         std::vector<uint32_t> labels;                          // names of clip moments waiting to be delivered
         // Camera shake as the script sets it up: a jolt source parented to the camera with angular amplitudes
         // and a radius, and the script moves the source nearer (stronger) or farther (weaker).
@@ -448,6 +468,94 @@ void driveOpening(double now, float dt) {
     }
 }
 
+void rotate(const float q[4], const float v[3], float out[3]) {
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    const float tx = 2 * (y * v[2] - z * v[1]), ty = 2 * (z * v[0] - x * v[2]), tz = 2 * (x * v[1] - y * v[0]);
+    out[0] = v[0] + w * tx + (y * tz - z * ty);
+    out[1] = v[1] + w * ty + (z * tx - x * tz);
+    out[2] = v[2] + w * tz + (x * ty - y * tx);
+}
+
+// A model's vertices (position, normal, uv) moved to a placement.
+void placeVertices(const std::vector<float>& model, const State::Opening::Placement& at, std::vector<float>& out) {
+    out.resize(model.size());
+    for (size_t v = 0; v + 7 < model.size(); v += 8) {
+        float p[3], n[3];
+        rotate(at.q, &model[v], p);
+        rotate(at.q, &model[v + 3], n);
+        for (int k = 0; k < 3; k++) { out[v + size_t(k)] = p[k] + at.pos[k]; out[v + 3 + size_t(k)] = n[k]; }
+        out[v + 6] = model[v + 6];
+        out[v + 7] = model[v + 7];
+    }
+}
+
+// Moves the spawned props (velocity, their own gravity, spin about their own axes) and rewrites their chunks.
+// There is no collision: a wreck stops at the height it was wrecked at, which is an approximation.
+void driveProps(VkRenderer& r, State::Opening& o, float dt) {
+    for (auto& [handle, p] : o.props) {
+        if (!p.model) continue;
+        const auto it = sectorChunks().find(p.key);
+        if (it == sectorChunks().end() || it->second.empty()) continue;
+        if (p.moving) {
+            for (int k = 0; k < 3; k++) { p.vel[k] += p.gravity[k] * dt; p.at.pos[k] += p.vel[k] * dt; }
+            const float w[3] = {p.spin[0] * dt * 0.5f, p.spin[1] * dt * 0.5f, p.spin[2] * dt * 0.5f};
+            const float q[4] = {p.at.q[0], p.at.q[1], p.at.q[2], p.at.q[3]};
+            p.at.q[0] = q[0] + q[3] * w[0] + q[1] * w[2] - q[2] * w[1];
+            p.at.q[1] = q[1] + q[3] * w[1] + q[2] * w[0] - q[0] * w[2];
+            p.at.q[2] = q[2] + q[3] * w[2] + q[0] * w[1] - q[1] * w[0];
+            p.at.q[3] = q[3] - q[0] * w[0] - q[1] * w[1] - q[2] * w[2];
+            const float len = std::sqrt(p.at.q[0] * p.at.q[0] + p.at.q[1] * p.at.q[1] + p.at.q[2] * p.at.q[2] + p.at.q[3] * p.at.q[3]);
+            for (float& c : p.at.q) c /= len > 0 ? len : 1.0f;
+            if (p.at.pos[2] < p.floor) { p.at.pos[2] = p.floor; p.moving = false; }
+            if (p.thrown && (p.target[0] - p.at.pos[0]) * p.vel[0] + (p.target[1] - p.at.pos[1]) * p.vel[1] <= 0) {
+                for (int k = 0; k < 3; k++) p.at.pos[k] = p.target[k];
+                p.moving = p.thrown = false;
+            }
+        } else if (p.uploaded) {
+            continue;   // at rest and already drawn where it is
+        }
+        const Scene& model = (p.wrecked ? p.model->wreck : p.model->intact).scene;
+        placeVertices(model.vertices, p.at, p.vertices);
+        r.updateChunkVertices(it->second[0], p.vertices);
+        const float lo[3] = {p.at.pos[0] - 700, p.at.pos[1] - 700, p.at.pos[2] - 700}, hi[3] = {p.at.pos[0] + 700, p.at.pos[1] + 700, p.at.pos[2] + 700};
+        r.setChunkBox(it->second[0], lo, hi);
+        p.uploaded = true;
+    }
+}
+
+// Queues a prop's chunk (its model placed where the prop is) for the renderer.
+void queueProp(State::Opening::Prop& p) {
+    State::Job j;
+    j.kind = State::Job::Add;
+    j.sector = p.key;
+    Chunk ch = p.wrecked ? p.model->wreck : p.model->intact;
+    placeVertices(ch.scene.vertices, p.at, p.vertices);
+    ch.scene.vertices = p.vertices;
+    for (int k = 0; k < 3; k++) { ch.scene.boxMin[k] = p.at.pos[k] - 700; ch.scene.boxMax[k] = p.at.pos[k] + 700; }
+    j.chunks.push_back(std::move(ch));
+    p.uploaded = false;
+    std::lock_guard<std::mutex> l(g.lock);
+    g.jobs.push_back(std::move(j));
+}
+
+// The velocity of the given speed that carries a thrown object from one point to another under a gravity
+// along the z axis (the flatter of the two arcs; 45 degrees when the target is out of range).
+void launchVelocity(const float from[3], const float to[3], float gravityZ, float speed, float out[3]) {
+    const float dx = to[0] - from[0], dy = to[1] - from[1], dz = to[2] - from[2];
+    const float x = std::sqrt(dx * dx + dy * dy), gr = std::fabs(gravityZ), s2 = speed * speed;
+    float tangent = 1.0f;
+    if (x > 1e-3f && gr > 1e-3f) {
+        const float disc = s2 * s2 - gr * (gr * x * x + 2 * dz * s2);
+        if (disc >= 0) tangent = (s2 - std::sqrt(disc)) / (gr * x);
+    } else if (x > 1e-3f) {
+        tangent = dz / x;
+    }
+    const float c = 1.0f / std::sqrt(1 + tangent * tangent), sn = tangent * c;
+    out[0] = x > 1e-3f ? speed * c * dx / x : 0;
+    out[1] = x > 1e-3f ? speed * c * dy / x : 0;
+    out[2] = speed * sn;
+}
+
 // Builds the script machine for the opening mission's pack and connects the engine features that exist.
 std::shared_ptr<State::Opening> makeOpening(const Pack& p) {
     auto o = std::make_shared<State::Opening>();
@@ -455,6 +563,46 @@ std::shared_ptr<State::Opening> makeOpening(const Pack& p) {
     o->vm = std::make_unique<ScriptMachine>(readScriptImage(p), *o->host);
     if (o->vm->image().classes.empty()) return nullptr;
     State::Opening* op = o.get();
+    // Where the pack's named objects are, and which proxy each spawn site makes.
+    for (uint32_t obj : p.objects()) {
+        if (size_t(obj) + 0x70 > p.data().size()) continue;
+        const uint32_t oid = p.word(size_t(obj) + 0x0C);
+        if (oid == 0 || oid >= g.names.size() || o->placed.count(g.names[oid])) continue;
+        State::Opening::Placement at;
+        for (int k = 0; k < 4; k++) { const uint32_t w = p.word(size_t(obj) + 0x50 + 4 * size_t(k)); memcpy(&at.q[k], &w, 4); }
+        for (int k = 0; k < 3; k++) { const uint32_t w = p.word(size_t(obj) + 0x60 + 4 * size_t(k)); memcpy(&at.pos[k], &w, 4); }
+        if (at.q[0] == 0 && at.q[1] == 0 && at.q[2] == 0 && at.q[3] == 0) at.q[3] = 1;
+        o->placed[g.names[oid]] = at;
+    }
+    // Models for the vehicles the sites can spawn, from the core pack (intact, and wrecked: damage state 4).
+    if (g.core) {
+        for (const ProxySite& site : readProxySites(p)) {
+            if (site.nameOid >= g.names.size() || site.proxyOid >= g.names.size()) continue;
+            const std::string proxy = g.names[site.proxyOid];
+            o->siteProxy[g.names[site.nameOid]] = proxy;
+            if (o->models.count(proxy) || o->models.size() >= 6) continue;
+            const uint32_t file = findProxyFile(*g.core, g.names, proxy);
+            if (!file) continue;
+            const auto range = subFileRange(*g.core, file, kProxyFileClass);
+            const auto meshes = readStaticMeshes(*g.core, nullptr, nullptr, &g.names, range.first, range.second);
+            State::Opening::Model m;
+            m.intact.scene = buildFileScene(*g.core, meshes, file, 0);
+            if (m.intact.scene.vertices.empty()) continue;   // not a vehicle: other kinds of proxy are not built yet
+            m.wreck.scene = buildFileScene(*g.core, meshes, file, 4);
+            // Textures go to the renderer once, with an empty job; the chunks keep their texture keys.
+            State::Job j;
+            j.kind = State::Job::Add;
+            j.sector = "@model " + proxy;
+            j.chunks.push_back(m.intact);
+            j.chunks.push_back(m.wreck);
+            j.textures = decodeChunkTextures(j.chunks, {{g.core.get(), &g.coreTextures}}, 512, [](uint64_t) { return false; });
+            m.intact = j.chunks[0];
+            m.wreck = j.chunks[1];
+            j.chunks.clear();
+            o->models[proxy] = std::move(m);
+            o->modelTextures.push_back(std::move(j.textures));
+        }
+    }
     // Screen fills: every object whose property set is a fill's.
     for (uint32_t obj : p.objects()) {
         const auto props = readObjectProperties(o->vm->image(), obj);
@@ -473,6 +621,44 @@ std::shared_ptr<State::Opening> makeOpening(const Pack& p) {
             if (member == "Fill.trigger") { op->fills.trigger(object); return true; }
             if (member == "Fill.UNTRIGGER") { op->fills.untrigger(object); return true; }
             if (member == "Fill.STOP") { op->fills.stop(object, c.argFloat(0)); return true; }
+        }
+        // Spawning: a site makes a copy of its proxy where the site is; the copy's handle stands for both the
+        // spawned file and its root object.
+        if (member == "ProxySite.SPAWN") {
+            const auto site = op->siteProxy.find(object);
+            const auto model = site == op->siteProxy.end() ? op->models.end() : op->models.find(site->second);
+            if (model == op->models.end() || op->props.size() >= 24) return false;
+            const uint32_t handle = c.machine->newHandle();
+            State::Opening::Prop& p = op->props[handle];
+            p.key = "@prop" + std::to_string(handle & 0xFFFFF);
+            p.model = &model->second;
+            p.at = op->placed[object];
+            queueProp(p);
+            c.resultWord(handle);
+            return true;
+        }
+        const size_t dot = member.find('.');
+        const std::string what = dot == std::string::npos ? member : member.substr(dot + 1);
+        if (what == "MATCH_OBJECT" && c.args.size() >= 8) {   // take another object's place
+            const std::string other = op->host->objectName(*c.machine, c.argWord(0));
+            const auto from = op->placed.find(other);
+            if (from == op->placed.end()) return false;
+            const auto prop = op->props.find(c.object);
+            if (prop != op->props.end()) { prop->second.at = from->second; prop->second.uploaded = false; return true; }
+            if (!object.empty()) { op->placed[object] = from->second; return true; }
+            return false;
+        }
+        if (what == "DESTROY") {
+            const auto prop = op->props.find(c.object);
+            if (prop == op->props.end()) return false;
+            State::Opening::Prop& p = prop->second;
+            if (!p.wrecked && !p.model->wreck.scene.vertices.empty()) {
+                p.wrecked = true;
+                p.floor = p.at.pos[2] - 40.0f;
+                p.thrown = false;
+                queueProp(p);
+            }
+            return true;
         }
         if (object == "uno_press_start") {
             if (member == "Uno.trigger") { g.promptUi.store(true); return true; }
@@ -507,9 +693,63 @@ std::shared_ptr<State::Opening> makeOpening(const Pack& p) {
             return true;
         }
         if (fn == "StopJolt") { op->joltOn = false; return true; }
+        if (fn == "VecMuzzle" && c.args.size() >= 68) {   // result, from, to, gravity (vectors), speed
+            const float from[3] = {c.argFloat(4), c.argFloat(5), c.argFloat(6)}, to[3] = {c.argFloat(8), c.argFloat(9), c.argFloat(10)};
+            float v[3];
+            launchVelocity(from, to, c.argFloat(14), c.argFloat(16), v);
+            for (auto& [handle, p] : op->props) {   // the prop being thrown is the one standing at `from`
+                if (p.at.pos[0] != from[0] || p.at.pos[1] != from[1] || p.at.pos[2] != from[2]) continue;
+                p.thrown = true;
+                for (int k = 0; k < 3; k++) p.target[k] = to[k];
+            }
+            uint8_t* out = c.args.data();
+            for (int k = 0; k < 4; k++) {
+                uint32_t w = 0;
+                if (k < 3) memcpy(&w, &v[k], 4);
+                out[4 * k] = uint8_t(w >> 24); out[4 * k + 1] = uint8_t(w >> 16); out[4 * k + 2] = uint8_t(w >> 8); out[4 * k + 3] = uint8_t(w);
+            }
+            return true;
+        }
         return false;
     };
     o->host->onProperty = [op](ScriptCall& c, const std::string& object, const std::string& member) {
+        auto readVec = [&c](float v[3]) {
+            for (int k = 0; k < 3; k++) {
+                const uint32_t w = uint32_t(c.value[4 * k]) << 24 | uint32_t(c.value[4 * k + 1]) << 16 | uint32_t(c.value[4 * k + 2]) << 8 | c.value[4 * k + 3];
+                memcpy(&v[k], &w, 4);
+            }
+        };
+        auto writeVec = [&c](const float v[3]) {
+            for (int k = 0; k < 4; k++) {
+                uint32_t w = 0;
+                if (k < 3) memcpy(&w, &v[k], 4);
+                c.value[4 * k] = uint8_t(w >> 24); c.value[4 * k + 1] = uint8_t(w >> 16); c.value[4 * k + 2] = uint8_t(w >> 8); c.value[4 * k + 3] = uint8_t(w);
+            }
+        };
+        const size_t dot = member.find('.');
+        const std::string what = dot == std::string::npos ? member : member.substr(dot + 1);
+        const auto prop = op->props.find(c.object);
+        if (prop != op->props.end()) {
+            State::Opening::Prop& p = prop->second;
+            if (!c.isSet && what == "ROOT_OBJECT") {   // the spawned file's root object: the same handle
+                c.value[0] = uint8_t(c.object >> 24); c.value[1] = uint8_t(c.object >> 16); c.value[2] = uint8_t(c.object >> 8); c.value[3] = uint8_t(c.object);
+                return true;
+            }
+            if (!c.isSet && what == "pos" && scriptTypeSize(c.type) == 16) { writeVec(p.at.pos); return true; }
+            if (c.isSet && scriptTypeSize(c.type) == 16) {
+                if (what == "pos") { readVec(p.at.pos); p.uploaded = false; return true; }
+                if (what == "VELOCITY") { readVec(p.vel); p.moving = p.vel[0] != 0 || p.vel[1] != 0 || p.vel[2] != 0 || p.moving; return true; }
+                if (what == "gravity") { readVec(p.gravity); return true; }
+                if (what == "ANGULAR_VELOCITY_LOCAL" || what == "ANGULAR_VELOCITY") { readVec(p.spin); p.moving = true; return true; }
+            }
+            return false;
+        }
+        if (!c.isSet && what == "pos" && scriptTypeSize(c.type) == 16 && !object.empty()) {   // a named object of the pack
+            const auto at = op->placed.find(object);
+            if (at == op->placed.end()) return false;
+            writeVec(at->second.pos);
+            return true;
+        }
         if (!c.isSet || object != "xo_camera_jolt" || member != "Xo.POS_LOCAL") return false;
         float v[3];
         for (int k = 0; k < 3; k++) {
@@ -657,6 +897,14 @@ void renderLoop() {
         }
         animateActor(r, now, dt);
         driveOpening(now, dt);
+        {
+            std::shared_ptr<State::Opening> o;
+            {
+                std::lock_guard<std::mutex> l(g.lock);
+                o = g.opening;
+            }
+            if (o) driveProps(r, *o, dt);
+        }
         driveShot(r, now);
         if (!r.drawFrame()) {
             std::lock_guard<std::mutex> l(g.lock);
@@ -1308,6 +1556,16 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_title(JNIEnv* env, j
             State::Job j;
             j.kind = State::Job::Clear;
             g.jobs.push_back(std::move(j));
+            if (opening) {   // the spawnable models' textures, after the clear
+                for (auto& textures : opening->modelTextures) {
+                    State::Job t;
+                    t.kind = State::Job::Add;
+                    t.sector = "@model textures";
+                    t.textures = std::move(textures);
+                    g.jobs.push_back(std::move(t));
+                }
+                opening->modelTextures.clear();
+            }
             g.worldOn = true;
             g.overview = false;
             g.titleOn = true;

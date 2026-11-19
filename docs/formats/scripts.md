@@ -89,6 +89,7 @@ type). Pushing a constant first aligns the stack to the constant's alignment.
 | 80-85 | | and, or, max, min |
 | 88, 8D-90, 9D | | not; int to float, float to int, int to bool, bool to int, is zero |
 | 91, 95, 96, 98 | | list element, build list, list count, list contains |
+| A6 / A7 / A8-AF | 2 / 0 / 0 | make a structure from the top `b1` bytes / load a field / store a field |
 | B0 | | push global object number `b2b3` (the pack's table of object names; `b1` = 1 for object lists) |
 | B1 | | end of an initialisation block |
 | B3, B4 | 2 / 4 | zero-initialise a value |
@@ -106,8 +107,8 @@ holds its length. A script class is a (initialisation block, symbol table, symbo
 owning object; running the initialisation block in a fresh scope binds the class's functions and sets its
 member variables.
 
-**Not implemented yet:** object creation (A6), list concatenation and search (97, 99), random element
-(9C), string building (9E), member access through an object pointer (A7-AF), the property forms 27-33,
+**Not implemented yet:** list concatenation and search (97, 99), random element
+(9C), string building (9E), the property forms 27-33,
 matrix arithmetic. Object lists are returned empty. Scopes are never freed. Engine
 functions other than threads, sleeping and time are not implemented: the opening needs fades, the title
 prompt, the cameras, sound, time of day, spawning and the rest (see docs/PROGRESS.md).

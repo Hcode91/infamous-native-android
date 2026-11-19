@@ -522,7 +522,28 @@ void ScriptMachine::step(ScriptThread& t) {
             M[r] = hit;
             break;
         }
-        case 0xA6: next += 8; unknown_++; break;   // object creation: not read yet
+        case 0xA6: {   // make a structure from the top b1 bytes; its handle goes b2 bytes below the top
+            next += 8;
+            if (sp < uint32_t(b1) + 0x40 || sp < uint32_t(b2) + 0x40) return fault();
+            const uint32_t dataAt = alloc(std::span<const uint8_t>(M + sp - b1, b1));
+            uint8_t rec[16];
+            wr(rec, 1); wr(rec + 4, word(a + 4)); wr(rec + 8, word(a + 8)); wr(rec + 12, dataAt);   // fields are found through +0xC
+            wr(M + sp - b2, alloc(rec));
+            break;
+        }
+        case 0xA7: {   // load a structure field: destination of b3 bytes at sp-b1, the handle right above it
+            const uint32_t dst = sp - b1, obj = rd(M + up(dst + b3, 4));
+            if (obj && uint64_t(word(obj + 12)) + b2 + b3 <= image_.data.size()) memcpy(M + dst, image_.data.data() + word(obj + 12) + b2, b3);
+            else memset(M + dst, 0, b3);
+            break;
+        }
+        case 0xA8: case 0xA9: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xAE: case 0xAF: {   // store a structure field
+            const uint32_t n = scriptTypeSize(b23), padded = up(n, 4), al = up(scriptTypeAlign(b23), 4);
+            if (sp < padded + al + 0x40) return fault();
+            const uint32_t obj = rd(M + sp - padded - al);
+            if (obj && uint64_t(word(obj + 12)) + b1 + n <= image_.data.size()) memcpy(image_.data.data() + word(obj + 12) + b1, M + sp - padded, n);
+            break;
+        }
         case 0xB0: wr(M + sp - 4, b1 ? 0 : (kScriptGlobalTag | b23)); break;   // b1 = 1: an object list (not resolved yet)
         case 0xB1: t.done = true; break;   // end of an initialisation block
         case 0xB3: case 0xB4: next += op == 0xB3 ? 8 : 16; memset(M + sp - b1, 0, scriptTypeSize(b23)); break;
