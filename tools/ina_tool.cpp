@@ -117,6 +117,11 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 n++;
+                if (t.cube)   // the other five faces of a cube map
+                    for (uint32_t face = 1; face < 6; face++) {
+                        const Image f = decodeTexture(p, t, face);
+                        writePng(std::string(argv[4]) + "/" + name + ".face" + std::to_string(face) + ".png", f.width, f.height, f.rgba);
+                    }
             }
             printf("%d textures written\n", n);
             return 0;

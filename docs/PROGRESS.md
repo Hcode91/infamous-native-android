@@ -31,7 +31,7 @@ Last updated: 2026-11-19. Tested against the EU disc release (BCES00220).
 | Streaming | The city is streamed around the camera: the current sector at full detail, its neighbours at level 5, the far-away city elsewhere; geometry in culled chunks |
 | Collision | Sector collision polygons decoded; the camera follows the ground. See docs/formats/collision.md |
 | Characters | Mesh entries, model-space boxes and packed positions decoded: characters, creatures and vehicles assemble in their bind pose. Texture coordinates, materials and variants (which optional meshes each shows) and skinning tables (joints and weights per vertex) decoded; characters are posed from joint transforms, at rest and animated. Variant material swaps and proportions, and unskinned props (the pistol), are not applied. See docs/formats/characters.md |
-| Scripts | Property sets decoded (typed values bound to named class properties); instruction streams found but not decoded. See docs/formats/scripts.md |
+| Scripts | Property sets decoded; the script machine's interpreter located in the executable (185 opcodes) and a first handful of instructions read. The opening mission's script identified as the source of the opening sequence. See docs/formats/scripts.md |
 | Animation | Clip blocks (`CD`) decode to joint transforms: command lists, constant channels, bit-packed key frames, packed scale and offset, rotation channels. All 170 clips of the cop pack parse and their key data has exactly the predicted size; the cop aims with both hands on one point and runs. Legs are placed from the clips' foot targets with our own two-bone solve (the game's solver is not known). Named animations map to their clip blocks (880 nodes in the shared pack). Open: two flag bits on some rotation components, float channels, how blend nodes mix clips. See docs/formats/animation.md |
 | Lights | Light position, rotation, ranges and cone angles located; colours not yet. See docs/formats/lights.md |
 
@@ -67,9 +67,11 @@ None yet. No figure will be reported here until it has been measured on a device
 
 ## Next
 
-1. Run the streaming build on a device.
-2. Run the title view and first play on a device.
-3. Walls (collision against the sides of things), jumping and falling clips, the walk-to-run blend.
-4. The opening mission's objects and camera, then its script.
-5. The script instruction set (from the game executable's interpreter).
-6. Light colours, then lights in the renderer.
+The goal is the game's real opening: logo over the opening shot, start, the blast, the cutscene, the first
+objectives. That sequence is the opening mission's script, so the order is:
+
+1. The script machine: the full instruction set, then how scripts attach to objects and events.
+2. A script machine in this engine, and the game functions the opening calls, one at a time (title
+   objects, time of day, cameras, effects, warps, player switches, prompts and text, fades).
+3. Sky, lighting and fog from the opening's cube maps.
+4. Run the title view and first play (already built) on a device.
