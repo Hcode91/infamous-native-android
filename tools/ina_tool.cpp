@@ -6,6 +6,7 @@
 //   ina_tool city <archive holding EMPIRE.xpp> [out.obj] [oid_manifest.txt]             the far-away city and its hex cells
 //   ina_tool clips <archive> <pack> [oid_manifest.txt] [clip] [frame] [out.obj]         animation clips; one clip posed
 //   ina_tool anims <archive> <pack> <oid_manifest.txt> [name filter]                    named animations and their clips
+//   ina_tool files <archive> <pack> <oid_manifest.txt>                                  files merged into a pack, meshes in each
 //   ina_tool props <archive> <pack> <oid_manifest.txt> [name filter]                    objects' property sets
 //   ina_tool script <archive> <pack> <oid_manifest.txt> <function> [seconds]            run a script function, print its requests
 #include "anim/character_model.h"
@@ -38,6 +39,19 @@
 #include <vector>
 
 using namespace ina;
+
+// Output files are only ever created, never replaced, and must be named *.obj: an argument in the wrong
+// position must not be able to destroy an input file.
+static FILE* createObj(const char* path) {
+    const std::string s = path ? path : "";
+    if (s.size() < 5 || s.compare(s.size() - 4, 4, ".obj") != 0) {
+        fprintf(stderr, "refusing to write %s: output files must end in .obj\n", s.c_str());
+        return nullptr;
+    }
+    FILE* f = fopen(path, "wx");   // fails when the file exists
+    if (!f) fprintf(stderr, "refusing to write %s: it already exists or cannot be created\n", s.c_str());
+    return f;
+}
 
 static std::vector<std::string> loadNames(const char* path) {
     std::vector<std::string> names;
@@ -198,7 +212,7 @@ int main(int argc, char** argv) {
             const size_t placedPieces = builder.pieces(), placedTris = builder.triangles();
             const Scene scene = builder.finish();
             if (objPath) {
-                FILE* obj = fopen(objPath, "w");
+                FILE* obj = createObj(objPath);
                 if (!obj) {
                     fprintf(stderr, "cannot write %s\n", objPath);
                     return 1;
@@ -290,7 +304,7 @@ int main(int argc, char** argv) {
             const auto objs = readCollision(p);
             GroundGrid ground;
             const float zero[3] = {0, 0, 0};
-            FILE* obj = argc > 4 ? fopen(argv[4], "w") : nullptr;
+            FILE* obj = argc > 4 ? createObj(argv[4]) : nullptr;
             size_t base = 1;
             for (const CollisionObject& o : objs) {
                 size_t tris = 0, verts = 0;
@@ -378,7 +392,7 @@ int main(int argc, char** argv) {
             const CharacterModel model(std::move(parts), skel, zero);
             std::vector<float> v = model.scene().vertices;
             model.skin(world, v);
-            FILE* obj = fopen(argv[9], "w");
+            FILE* obj = createObj(argv[9]);
             if (!obj) return 1;
             for (size_t i = 0; i + 7 < v.size(); i += 8) fprintf(obj, "v %.3f %.3f %.3f\n", v[i], v[i + 1], v[i + 2]);
             const auto& ix = model.scene().indices;
@@ -386,6 +400,35 @@ int main(int argc, char** argv) {
             fclose(obj);
             printf("%zu meshes, %zu triangles, hierarchy at 0x%x (%u joints, %u animated), %zu leg chains, clip 0x%x %u frames\n", count, model.triangles(),
                    skel.offset, skel.jointCount, skel.animatedJoints, legs.size(), clip.offset, clip.frames);
+            return 0;
+        }
+        if (cmd == "files" && argc >= 5) {
+            // ina_tool files <archive> <pack> <oid_manifest.txt>: the files merged into a pack and the static meshes in each
+            const int idx = arc.find(argv[3]);
+            if (idx < 0) {
+                fprintf(stderr, "no pack named %s\n", argv[3]);
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            const auto names = loadNames(argv[4]);
+            size_t skipped = 0;
+            const auto meshes = readStaticMeshes(p, &skipped, nullptr, &names);
+            for (uint32_t o : p.objects()) {
+                if (p.word(o) != 0x228) continue;
+                const auto range = subFileRange(p, o);
+                size_t count = 0, tris = 0, textured = 0;
+                for (const StaticMesh& m : meshes) {
+                    if (m.recordOffset < range.first || m.recordOffset >= range.second) continue;
+                    count++;
+                    tris += m.indices.size() / 3;
+                    textured += m.colorTextureOid != 0;
+                }
+                const uint32_t oid = p.word(size_t(o) + 0x0C);
+                printf("0x%06x..0x%06x  %-48s %3zu meshes, %5zu triangles, %zu textured\n", range.first, range.second,
+                       oid < names.size() ? names[oid].c_str() : ("oid " + std::to_string(oid)).c_str(), count, tris, textured);
+            }
+            printf("%zu meshes in all, %zu skipped\n", meshes.size(), skipped);
             return 0;
         }
         if (cmd == "props" && argc >= 5) {
@@ -566,7 +609,7 @@ int main(int argc, char** argv) {
                 const CharacterModel model(std::move(parts), skel, zero);
                 std::vector<float> v = model.scene().vertices;
                 model.skin(world, v);
-                FILE* obj = fopen(argv[7], "w");
+                FILE* obj = createObj(argv[7]);
                 if (!obj) return 1;
                 for (size_t i = 0; i + 7 < v.size(); i += 8) fprintf(obj, "v %.3f %.3f %.3f\n", v[i], v[i + 1], v[i + 2]);
                 const auto& ix = model.scene().indices;
@@ -601,7 +644,7 @@ int main(int argc, char** argv) {
             const Skeleton skel = readSkeleton(p);
             const bool rest = argc > 7 && std::string(argv[7]) == "rest" && skel.jointCount;
             const std::vector<float> world = rest ? poseToWorld(skel, skel.restPose) : std::vector<float>();
-            FILE* obj = argc > 4 ? fopen(argv[4], "w") : nullptr;
+            FILE* obj = argc > 4 ? createObj(argv[4]) : nullptr;
             for (PackedMesh m : meshes) {
                 if (rest) m.positions = skinPositions(m, skel, world);
                 if (pick >= 0 && size_t(pick) < variants.size() && !variantShows(variants[size_t(pick)], m)) continue;
