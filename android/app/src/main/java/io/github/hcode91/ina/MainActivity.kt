@@ -217,7 +217,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         stickView = StickView(this)
         stickView.radius = 60f * resources.displayMetrics.density
         root.addView(stickView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        // The black cover the opening script fades in and out.
+        // The colour cover for the screen fills the opening script switches on (black, the blast's flash).
         coverView = View(this).apply {
             setBackgroundColor(Color.BLACK)
             alpha = 0f
@@ -270,6 +270,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             override fun run() {
                 if (opened && gameMode) {
                     val o = Native.opening()
+                    coverView.setBackgroundColor(Color.rgb((o[3] * 255f).toInt().coerceIn(0, 255), (o[4] * 255f).toInt().coerceIn(0, 255), (o[5] * 255f).toInt().coerceIn(0, 255)))
                     coverView.alpha = o[0]
                     if (o[2] > 0f && titleLayer.visibility == View.VISIBLE && titleNote.text.toString() == "Tap to start") {
                         val show = if (o[1] > 0f) View.VISIBLE else View.INVISIBLE

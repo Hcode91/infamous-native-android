@@ -1,11 +1,21 @@
 # Scripts and object properties (partly understood)
 
-**Property sets.** Objects carry lists of property assignments that the game binds at load time. Each
-entry is 20 bytes: a header word `0x23 00 tttt` (`tttt` is the value type: 0x0001 boolean, 0x0002
-integer, 0x0003 float, 0x1012 enumeration or flags), three words the game fills in, and the value. Lists
-end with `0xB1000000`. The `SPLP` fixup chunk names, for each entry, the class and the property it sets:
-in sector A1 a camera volume sets `MODES` = 4, `FIELD_OF_VIEW` = 0.9, `SWITCH_IN_AIR` = 0 and
-`PRIORITY` = 0. See [xpp-pack.md](xpp-pack.md).
+**Property sets.** Objects carry lists of property assignments that the game binds at load time. An
+object's word at +0x28 points to a pair whose second word points to a record; the record's first word
+points to the list. Each entry is a set-instruction with its value inline: `0x23 00 tttt` followed by three
+link words and the value, or `0x2A 00 tttt` followed by four words and the value (`tttt` is the value type;
+16-byte values are aligned to 16). The list ends at the first word that is neither. The `SPLP` chunk
+names, for each entry, the class and the property it sets. `ina_tool props` lists them;
+`readObjectProperties` reads them.
+
+**Fills** (class 0x212) are timed full-screen effects that scripts switch on and off, described entirely
+by their property sets: `FADE_IN_TIME`, `PEAK_TIME` or `HOLD_AT_PEAK`, `FADE_OUT_TIME`, and what they do
+at full strength: `OVERLAY_COLOR` and `OVERLAY_OPACITY`, `ADD_BLOOM` and `ADD_BLOOM_COLOR`,
+`MULTIPLY_BLOOM`, fog, depth of field, desaturation, sound settings. Colours are 0..255. Scripts call
+`trigger`, `UNTRIGGER` and `STOP(seconds)`. The engine implements the envelope and the overlay, and
+approximates added bloom by an overlay of the bloom colour; the reading of the envelope (fade in, hold or
+stay for the peak time, fade out; `UNTRIGGER` fades out over the fill's own time, `STOP` over the given
+time) follows the property names and is not yet checked against the game.
 
 **The script machine (located, being decoded).** Property sets are programs for a bytecode machine, and
 so is all mission logic. Instructions are 32-bit words with the opcode in the top byte; some are followed

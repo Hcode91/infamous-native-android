@@ -36,7 +36,7 @@ object Native {
     @JvmStatic external fun startGame(): String
 
     /** The movement stick: x right, y forward, each -1..1. */
-    /** What the opening script wants on screen: [black cover 0..1, prompt shown, script running]. */
+    /** What the opening script wants on screen: [cover opacity 0..1, prompt shown, script running, cover red, green, blue]. */
     @JvmStatic external fun opening(): FloatArray
 
     @JvmStatic external fun stick(x: Float, y: Float)

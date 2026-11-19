@@ -40,7 +40,7 @@ Last updated: 2026-11-19. Tested against the EU disc release (BCES00220).
 | Area | State |
 |---|---|
 | World viewer, streaming | Sectors load and unload as the camera moves; two fingers move the camera, which stays on the ground |
-| Title view and first play | On launch the opening mission's own script runs in the script machine and decides the sequence: black, fade in on the first camera shot's first frame, then the logo and prompt (all read from the user's files); a tap is the start button; the script then plays the 15-second shot and waits for it. The shot's labelled moments are delivered to the script's label handler, and the camera shake it sets up from them is applied (amplitudes and strength from the script; the waveform is this engine's own). Of what the script asks for, only the black cover, the prompt, the button, the first camera and the shake are implemented; the flash, explosions, flying cars, people, sound, time of day, the second camera and everything after the first function are not, so when that function returns the app hands over to the player: left thumb moves him (idle and run clips, blended), right thumb turns the camera, he follows the collision ground. Not run on a device yet |
+| Title view and first play | On launch the opening mission's own script runs in the script machine and decides the sequence: black, fade in on the first camera shot's first frame, then the logo and prompt (all read from the user's files); a tap is the start button; the script then plays the 15-second shot and waits for it. The shot's labelled moments are delivered to the script's label handler, and the camera shake it sets up from them is applied (amplitudes and strength from the script; the waveform is this engine's own). Screen fills are read from their objects' property sets and run as timed overlays: the black cover and the blast's white flash and afterglow (bloom is approximated by a colour overlay; fog, depth of field and desaturation fills do nothing yet). Not implemented: explosions, flying cars, people, sound, time of day, the second camera and everything after the first function, so when that function returns the app hands over to the player: left thumb moves him (idle and run clips, blended), right thumb turns the camera, he follows the collision ground. Not run on a device yet |
 | World viewer, props | The cop's pistol rides in his right hand |
 | World viewer, whole city | Draws the far-away city on its own |
 
@@ -71,8 +71,7 @@ The goal is the game's real opening: logo over the opening shot, start, the blas
 objectives. That sequence is the opening mission's script, so the order is:
 
 1. Run this build on a device: the scripted title, start and first shot.
-2. What the label handler asks for besides the shake: the flash and the other fills (their settings are
-   properties of the fill objects), the exploding car and debris, particle systems, sound.
+2. Spawning what the blast needs: the initial car, debris, particle systems, vehicles, people; sound.
 3. The second camera shot, then the next checkpoint's function: the warp, the cutscene and the first
    objectives (prompts and text, player switches, dialogue).
 4. The machine's missing instructions (object creation, object lists) and script methods on spawned objects.

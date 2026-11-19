@@ -33,6 +33,7 @@
 #include "assets/world_mesh.h"
 #include "core/bytes.h"
 #include "render/vk_renderer.h"
+#include "script/property_set.h"
 #include "script/script_host.h"
 #include "world/city_stream.h"
 #include "world/scene.h"
@@ -127,7 +128,7 @@ struct State {
         std::unique_ptr<BasicScriptHost> host;
         std::unique_ptr<ScriptMachine> vm;
         bool started = false;
-        float fade = 1.0f, fadeTarget = 1.0f, fadeRate = 0.0f;   // black cover, 0 clear .. 1 black
+        FillStack fills;                                       // the screen fills the script has switched on
         bool cameraDone = false;
         uint32_t mainThread = 0;
         int missionClass = -1;
@@ -139,7 +140,7 @@ struct State {
         std::vector<std::string> unhandled;                    // what the script asked for that is not implemented
     };
     std::shared_ptr<Opening> opening;
-    std::atomic<float> coverUi{0};           // for the app's black cover and prompt
+    std::atomic<float> coverUi{0}, coverR{0}, coverG{0}, coverB{0};   // for the app's colour cover and prompt
     std::atomic<bool> promptUi{false}, scriptedUi{false}, pressed{false};
     std::atomic<float> shakePan{0}, shakeTilt{0}, shakeRoll{0};   // current shake amplitudes, radians
     double shotStart = -1;   // render-loop time the shot started playing at; < 0: held on frame 0
@@ -426,11 +427,11 @@ void driveOpening(double now, float dt) {
     g.shakePan.store(o->joltPan * shake);
     g.shakeTilt.store(o->joltTilt * shake);
     g.shakeRoll.store(o->joltRoll * shake);
-    if (o->fade != o->fadeTarget) {
-        const float step = o->fadeRate * dt;
-        o->fade = o->fade < o->fadeTarget ? std::min(o->fadeTarget, o->fade + step) : std::max(o->fadeTarget, o->fade - step);
-    }
-    g.coverUi.store(o->fade);
+    o->fills.update(dt);
+    float cover[4];
+    o->fills.composite(cover);
+    g.coverR.store(cover[0]); g.coverG.store(cover[1]); g.coverB.store(cover[2]);
+    g.coverUi.store(cover[3]);
     g.scriptedUi.store(true);
     // When the entry function returns the script goes on to the next checkpoint (the cutscene and the first
     // objectives), which needs engine features that do not exist yet: hand over to the player instead.
@@ -454,20 +455,24 @@ std::shared_ptr<State::Opening> makeOpening(const Pack& p) {
     o->vm = std::make_unique<ScriptMachine>(readScriptImage(p), *o->host);
     if (o->vm->image().classes.empty()) return nullptr;
     State::Opening* op = o.get();
+    // Screen fills: every object whose property set is a fill's.
+    for (uint32_t obj : p.objects()) {
+        const auto props = readObjectProperties(o->vm->image(), obj);
+        bool fill = false;
+        for (const ScriptProperty& q : props) fill = fill || o->host->className(q.classId) == "Fill";
+        if (!fill || size_t(obj) + 0x10 > p.data().size()) continue;
+        const uint32_t oid = p.word(size_t(obj) + 0x0C);
+        if (oid < g.names.size()) o->fills.define(g.names[oid], fillSettings(props, g.names));
+    }
     o->host->onMethod = [op](ScriptCall& c, const std::string& object, const std::string& member) {
         if (member == "JoyStickThunk.FIsButtonPressed") {
             c.resultBool(g.pressed.load());
             return true;
         }
-        if (object == "fill_black") {   // the black cover: on, off, or faded out over a number of seconds
-            if (member == "Fill.trigger") { op->fadeTarget = 1.0f; op->fadeRate = 4.0f; return true; }
-            if (member == "Fill.UNTRIGGER") { op->fadeTarget = 0.0f; op->fadeRate = 4.0f; return true; }
-            if (member == "Fill.STOP") {
-                const float seconds = c.argFloat(0);
-                op->fadeTarget = 0.0f;
-                op->fadeRate = seconds > 0.01f ? 1.0f / seconds : 100.0f;
-                return true;
-            }
+        if (op->fills.known(object)) {   // a screen fill: on, off, or faded out over a number of seconds
+            if (member == "Fill.trigger") { op->fills.trigger(object); return true; }
+            if (member == "Fill.UNTRIGGER") { op->fills.untrigger(object); return true; }
+            if (member == "Fill.STOP") { op->fills.stop(object, c.argFloat(0)); return true; }
         }
         if (object == "uno_press_start") {
             if (member == "Uno.trigger") { g.promptUi.store(true); return true; }
@@ -1466,11 +1471,12 @@ JNIEXPORT jstring JNICALL Java_io_github_hcode91_ina_Native_startGame(JNIEnv* en
     return env->NewStringUTF(msg.c_str());
 }
 
-// What the opening script wants on screen: [black cover 0..1, prompt shown, script running].
+// What the opening script wants on screen: [cover opacity 0..1, prompt shown, script running, cover r, g, b].
 JNIEXPORT jfloatArray JNICALL Java_io_github_hcode91_ina_Native_opening(JNIEnv* env, jclass) {
-    const jfloat v[3] = {g.coverUi.load(), g.promptUi.load() ? 1.0f : 0.0f, g.scriptedUi.load() ? 1.0f : 0.0f};
-    jfloatArray a = env->NewFloatArray(3);
-    env->SetFloatArrayRegion(a, 0, 3, v);
+    const jfloat v[6] = {g.coverUi.load(), g.promptUi.load() ? 1.0f : 0.0f, g.scriptedUi.load() ? 1.0f : 0.0f,
+                         g.coverR.load(), g.coverG.load(), g.coverB.load()};
+    jfloatArray a = env->NewFloatArray(6);
+    env->SetFloatArrayRegion(a, 0, 6, v);
     return a;
 }
 

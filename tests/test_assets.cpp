@@ -8,6 +8,7 @@
 #include "assets/collision.h"
 #include "assets/hex_map.h"
 #include "assets/pack.h"
+#include "script/property_set.h"
 #include "script/script_host.h"
 #include "assets/psarc.h"
 #include "assets/texture.h"
@@ -800,6 +801,38 @@ int main() {
         CHECK(reported == 7.0f && reportedAt == 0.6);
         CHECK(vm.liveThreads() == 0 && vm.unknownInstructions() == 0);
         CHECK(scriptTypeSize(5) == 16 && scriptTypeAlign(5) == 16 && scriptTypeSize(1) == 1 && scriptTypeSize(0x2002) == 4);
+    }
+    {
+        // Screen fills: a held black cover faded out over a given time, and a flash that runs through its peak.
+        FillStack fills;
+        FillSettings black;
+        black.hold = true; black.overlayOpacity = 1; black.fadeOut = 3;
+        FillSettings flash;
+        flash.bloom = 1; flash.peak = 0.02f; flash.fadeOut = 0.1f;
+        fills.define("black", black);
+        fills.define("flash", flash);
+        float c[4];
+        fills.trigger("black");
+        fills.update(1.0f);
+        fills.composite(c);
+        CHECK(c[3] == 1.0f && c[0] == 0.0f);
+        fills.stop("black", 2.0f);
+        fills.update(1.0f);
+        fills.composite(c);
+        CHECK(std::fabs(c[3] - 0.5f) < 1e-4f);
+        fills.update(1.5f);
+        fills.composite(c);
+        CHECK(c[3] == 0.0f);
+        fills.trigger("flash");
+        fills.composite(c);
+        CHECK(c[3] == 1.0f && c[0] == 1.0f);
+        fills.update(0.03f);
+        fills.update(0.05f);
+        fills.composite(c);
+        CHECK(c[3] > 0.3f && c[3] < 0.7f);
+        fills.update(0.2f);
+        fills.composite(c);
+        CHECK(c[3] == 0.0f && !fills.known("other"));
     }
     (void)bef;
     printf(failures ? "%d FAILED\n" : "all tests passed\n", failures);

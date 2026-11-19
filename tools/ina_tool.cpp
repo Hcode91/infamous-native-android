@@ -6,6 +6,7 @@
 //   ina_tool city <archive holding EMPIRE.xpp> [out.obj] [oid_manifest.txt]             the far-away city and its hex cells
 //   ina_tool clips <archive> <pack> [oid_manifest.txt] [clip] [frame] [out.obj]         animation clips; one clip posed
 //   ina_tool anims <archive> <pack> <oid_manifest.txt> [name filter]                    named animations and their clips
+//   ina_tool props <archive> <pack> <oid_manifest.txt> [name filter]                    objects' property sets
 //   ina_tool script <archive> <pack> <oid_manifest.txt> <function> [seconds]            run a script function, print its requests
 #include "anim/character_model.h"
 #include "anim/anim_set.h"
@@ -16,6 +17,7 @@
 #include "assets/collision.h"
 #include "assets/hex_map.h"
 #include "assets/pack.h"
+#include "script/property_set.h"
 #include "script/script_host.h"
 #include "assets/psarc.h"
 #include "assets/texture.h"
@@ -384,6 +386,37 @@ int main(int argc, char** argv) {
             fclose(obj);
             printf("%zu meshes, %zu triangles, hierarchy at 0x%x (%u joints, %u animated), %zu leg chains, clip 0x%x %u frames\n", count, model.triangles(),
                    skel.offset, skel.jointCount, skel.animatedJoints, legs.size(), clip.offset, clip.frames);
+            return 0;
+        }
+        if (cmd == "props" && argc >= 5) {
+            // ina_tool props <archive> <pack> <oid_manifest.txt> [name filter]: objects' property sets
+            const int idx = arc.find(argv[3]);
+            if (idx < 0) {
+                fprintf(stderr, "no pack named %s\n", argv[3]);
+                return 1;
+            }
+            const auto bytes = arc.read(size_t(idx));
+            Pack p(bytes);
+            const auto names = loadNames(argv[4]);
+            const ScriptImage im = readScriptImage(p);
+            BasicScriptHost host(names);
+            for (uint32_t o : p.objects()) {
+                if (size_t(o) + 0x30 > im.data.size()) continue;
+                const uint32_t oid = p.word(size_t(o) + 0x0C);
+                const std::string nm = oid < names.size() ? names[oid] : "?";
+                if (argc > 5 && nm.find(argv[5]) == std::string::npos) continue;
+                const auto props = readObjectProperties(im, o);
+                if (props.empty()) continue;
+                printf("%s (class 0x%x)\n", nm.c_str(), p.word(o));
+                for (const ScriptProperty& q : props) {
+                    printf("    %s.%s type 0x%x =", host.className(q.classId).c_str(), host.name(q.nameOid).c_str(), q.type);
+                    if (q.type == 1) printf(" %s\n", q.flag ? "true" : "false");
+                    else if (q.type == 3) printf(" %g\n", q.v[0]);
+                    else if (q.type == 4 || q.type == 5) printf(" %g %g %g %g\n", q.v[0], q.v[1], q.v[2], q.v[3]);
+                    else if (q.type == 7) printf(" %s\n", host.name(q.raw).c_str());
+                    else printf(" 0x%x\n", q.raw);
+                }
+            }
             return 0;
         }
         if (cmd == "script" && argc >= 6) {
