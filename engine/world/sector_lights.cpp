@@ -87,7 +87,8 @@ std::vector<WorldLight> readSectorLights(const Pack& pack, const ScriptImage& im
 }
 
 Scene buildSectorProps(const Pack& sector, const Pack* core, const std::vector<std::string>& names, const float offset[3],
-                       size_t* placed) {
+                       size_t* placed,
+                       const std::vector<std::string>* skipContaining) {
     struct Group { DrawMode mode; uint8_t layer; uint32_t texture; std::vector<float> vertices; std::vector<uint32_t> indices; };
     std::map<std::tuple<int, int, uint32_t>, Group> groups;
     std::map<uint32_t, Scene> models;   // by prototype name
@@ -109,6 +110,11 @@ Scene buildSectorProps(const Pack& sector, const Pack* core, const std::vector<s
         }
         const Scene& model = it->second;
         if (model.vertices.empty()) continue;
+        if (skipContaining) {
+            bool skip = false;
+            for (const std::string& part : *skipContaining) skip = skip || names[in.proxyOid].find(part) != std::string::npos;
+            if (skip) continue;
+        }
         count++;
         for (const SceneBatch& b : model.batches) {
             Group& g = groups[{int(b.mode), int(b.layer), b.textureOid}];
