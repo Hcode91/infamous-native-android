@@ -149,6 +149,13 @@ func _event(e: Dictionary) -> void:
 			_music(name)
 		"sound":
 			_sound(name)
+		"voice":
+			_voice(name)
+		"text":
+			brief.text = texts.get(name, "")
+		"ui_off":
+			if name == "uno_controller_prompt":
+				brief.text = ""
 		"particles":
 			main._log("particle effect (not drawn yet): %s at %s" % [name, e["detail"]])
 		_:
@@ -452,6 +459,39 @@ func _music(playlist: String) -> void:
 			main._log("music %s -> %s" % [playlist, f])
 			return
 	main._log("music (not mapped yet): " + playlist)
+
+
+func _voice(id: String) -> void:
+	# a line of dialogue: its voice from the dialogue archive and its text as the subtitle; the script waits
+	subtitle.text = texts.get(id, "")
+	var len := 2.5
+	var arc: String = _dialog_archive()
+	if arc != "":
+		var bytes := game.archive_file(arc, "dialog/" + id + ".mp3")
+		if bytes.size() > 0:
+			var st := AudioStreamMP3.new()
+			st.data = bytes
+			var p := AudioStreamPlayer.new()
+			p.stream = st
+			add_child(p)
+			p.play()
+			p.finished.connect(p.queue_free)
+			len = st.get_length()
+	else:
+		main._log("dialogue archive not found: voices are silent")
+	await get_tree().create_timer(len + 0.3).timeout
+	if subtitle.text == texts.get(id, ""):
+		subtitle.text = ""
+	game.mission_voice_done()
+
+
+func _dialog_archive() -> String:
+	var f: String = main.game_folder
+	for c in [f + "/dialog/archive/english.psarc", f.get_base_dir() + "/dialog/archive/english.psarc",
+			f.get_base_dir().get_base_dir() + "/dialog/archive/english.psarc"]:
+		if FileAccess.file_exists(c):
+			return c
+	return ""
 
 
 func _sound(cue: String) -> void:

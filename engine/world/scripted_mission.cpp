@@ -746,6 +746,11 @@ void ScriptedMission::hook() {
             self->joltStrength_ = std::clamp(1.0f - d / self->joltRadius_, 0.0f, 1.0f);
             return true;
         }
+        if (c.isSet && member == "TextBox.text") {   // a text box of the interface gets a string of the game's text
+            const uint32_t v = be32(c.value);
+            self->emit("text", v < self->names_.size() ? self->names_[v] : "", object);
+            return true;
+        }
         if (c.isSet && member == "PowerGrid.IS_ACTIVE") {   // a district's power: street lamps and lit windows
             const auto f = self->found_.find(c.object);
             self->emit("power", f != self->found_.end() ? f->second : object, "", nullptr, c.value[0] ? 1.0f : 0.0f);
