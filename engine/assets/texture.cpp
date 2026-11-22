@@ -1,3 +1,4 @@
+#include <cstring>
 #include "assets/texture.h"
 #include "core/bytes.h"
 
@@ -129,12 +130,45 @@ Image decodeLevel(PixelFormat f, std::span<const uint8_t> src, uint32_t w, uint3
     return img;
 }
 
+namespace {
+
+// Uncompressed textures without the layout's "linear" flag (0x20 in the format byte) are stored swizzled:
+// a pixel's address interleaves the bits of x and y (x first), for as many bits as the smaller side has; the
+// larger side's remaining bits follow on top.
+void unswizzle(Image& img) {
+    const uint32_t w = img.width, h = img.height;
+    if (w == 0 || h == 0 || (w & (w - 1)) || (h & (h - 1))) return;   // only power-of-two sizes are swizzled
+    std::vector<uint8_t> out(img.rgba.size());
+    uint32_t lw = 0, lh = 0;
+    while ((1u << lw) < w) lw++;
+    while ((1u << lh) < h) lh++;
+    const uint32_t common = std::min(lw, lh);
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            uint64_t a = 0;
+            uint32_t bit = 0;
+            for (uint32_t k = 0; k < common; k++) {
+                a |= uint64_t((x >> k) & 1) << bit++;
+                a |= uint64_t((y >> k) & 1) << bit++;
+            }
+            if (lw > common) a |= uint64_t(x >> common) << bit;
+            else if (lh > common) a |= uint64_t(y >> common) << bit;
+            std::memcpy(&out[(size_t(y) * w + x) * 4], &img.rgba[size_t(a) * 4], 4);
+        }
+    }
+    img.rgba.swap(out);
+}
+
+}  // namespace
+
 Image decodeTexture(const Pack& pack, const TextureInfo& t, uint32_t face, uint32_t mip) {
     if (mip >= std::max(1u, t.mips) || face >= (t.cube ? 6u : 1u)) throw FormatError("texture: no such face or mip");
     const size_t off = size_t(t.dataOffset) + textureLevelOffset(t, face, mip);
     const auto data = pack.data();
     if (off > data.size()) throw FormatError("texture: data offset outside the pack");
-    return decodeLevel(t.format, data.subspan(off), std::max(1u, t.width >> mip), std::max(1u, t.height >> mip));
+    Image img = decodeLevel(t.format, data.subspan(off), std::max(1u, t.width >> mip), std::max(1u, t.height >> mip));
+    if (t.format == PixelFormat::Argb8 && !(t.rsxFormat & 0x2000)) unswizzle(img);
+    return img;
 }
 
 }  // namespace ina

@@ -7,6 +7,7 @@ extends Node3D
 
 const SETTINGS := "user://settings.cfg"
 
+const APP_VERSION := "0.6.2"   # keep in step with export_presets.cfg
 var game: InaGame
 var cam: Camera3D
 var env: Environment
@@ -14,8 +15,6 @@ var sun: DirectionalLight3D
 var ui: CanvasLayer
 var status: Label
 var prompt: Control
-var plate: TextureRect
-var logo: TextureRect
 var music: AudioStreamPlayer
 var ambience: AudioStreamPlayer
 var game_folder := ""
@@ -58,7 +57,7 @@ func _ready() -> void:
 		var f: String = args["folder"]
 		_load.call_deferred(f, args.get("manifest", f + "/oid_manifest.txt"))
 		return
-	_log("start: %s, %s, renderer %s" % [OS.get_name(), OS.get_model_name(), RenderingServer.get_current_rendering_method()])
+	_log("start: version %s, %s, %s, renderer %s" % [APP_VERSION, OS.get_name(), OS.get_model_name(), RenderingServer.get_current_rendering_method()])
 	_log("plugin: " + ("loaded" if ClassDB.class_exists("InaGame") else "NOT LOADED"))
 	if OS.get_name() == "Android":
 		OS.request_permissions()
@@ -179,51 +178,11 @@ func _search(dir: String, file: String, depth: int) -> String:
 func _make_ui() -> void:
 	ui = CanvasLayer.new()
 	add_child(ui)
-	# letterbox bars as in the original title (11% of the height at the top, 15% at the bottom with the logo)
-	for top in [true, false]:
-		var bar := ColorRect.new()
-		bar.color = Color.BLACK
-		bar.anchor_left = 0.0
-		bar.anchor_right = 1.0
-		bar.anchor_top = 0.0 if top else 0.847
-		bar.anchor_bottom = 0.11 if top else 1.0
-		bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		ui.add_child(bar)
-	# the prompt sits on the menu selector's two smeared lines, near the top of the picture
+	# whether the title wants start pressed (set by the director; the game's own screen, ui_press_start, draws it)
 	prompt = Control.new()
-	prompt.anchor_left = 0.385
-	prompt.anchor_right = 0.615
-	prompt.anchor_top = 0.165
-	prompt.anchor_bottom = 0.295
-	prompt.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	prompt.visible = false
+	prompt.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui.add_child(prompt)
-	plate = TextureRect.new()
-	plate.set_anchors_preset(Control.PRESET_FULL_RECT)
-	plate.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	plate.stretch_mode = TextureRect.STRETCH_SCALE
-	plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	prompt.add_child(plate)
-	var text := Label.new()
-	text.text = "Press the Start Button"
-	text.add_theme_font_size_override("font_size", 22)
-	text.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
-	text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	text.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	text.set_anchors_preset(Control.PRESET_FULL_RECT)
-	prompt.add_child(text)
-	# the game's logo, in the bottom bar
-	logo = TextureRect.new()
-	logo.anchor_left = 0.36
-	logo.anchor_right = 0.64
-	logo.anchor_top = 0.85
-	logo.anchor_bottom = 0.975
-	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	logo.flip_v = true   # the UI's textures are stored bottom row first
-	logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	logo.visible = false
-	ui.add_child(logo)
 	status = Label.new()
 	status.anchor_left = 0.02
 	status.anchor_top = 0.02
@@ -343,14 +302,6 @@ func _load(folder: String, manifest: String) -> void:
 		var tw := create_tween()
 		tw.tween_interval(4.0)
 		tw.tween_property(log_label, "modulate:a", 0.0, 1.0)
-	var lt := game.texture("infamous_logo.psd", "msn_jb_intro.sprig.xpp")
-	if lt != null:
-		logo.texture = lt
-		logo.visible = true
-	var pt := game.texture("pause_item_selector.psd")
-	if pt != null:
-		plate.texture = pt
-	logo.visible = false
 	if shot_path == "":
 		# the park's own ambience (the shared sound pack lists it for this park at night)
 		ambience = _play_mp3(game_folder + "/sounds/streaming_grains/8/i1_park_grnd_nite_nonpwrd.mp3", -10.0)
@@ -499,8 +450,6 @@ func _process(delta: float) -> void:
 			print("saved opening frame at ", at)
 			if opening_shots.is_empty():
 				get_tree().quit()
-	if prompt != null and prompt.visible:
-		prompt.modulate.a = 0.6 + 0.4 * sin(Time.get_ticks_msec() / 500.0)
 
 
 # ---------------------------------------------------------------------------------------------------------

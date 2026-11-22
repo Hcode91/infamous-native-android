@@ -470,7 +470,17 @@ void ScriptedMission::hook() {
             const bool title = object.find("press_start") != std::string::npos;   // the title's prompt
             if (what == "trigger") { if (title) self->prompt = true; self->emit("ui_on", object); return true; }
             if (what == "UNTRIGGER" || what == "REMOVE") { if (title) self->prompt = false; self->emit("ui_off", object); return true; }
-            if (what == "ACTIVATE_UI" || what == "DEACTIVATE_UI") return true;
+            if (what == "ACTIVATE_UI") {   // which of the screen's animations runs (an "anim_..." argument)
+                for (size_t k = 0; k < c.args.size() / 4; k++) {
+                    const uint32_t v = c.argWord(k);
+                    if (v > 0x100 && v < self->names_.size() && self->names_[v].rfind("anim_", 0) == 0) {
+                        self->emit("ui_anim", object, self->names_[v]);
+                        break;
+                    }
+                }
+                return true;
+            }
+            if (what == "DEACTIVATE_UI") return true;
         }
         if (member == "TodApply.SET_LERP") {   // blend weight of a time of day the script created
             auto it = self->tods.find(c.object);

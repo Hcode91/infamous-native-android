@@ -39,6 +39,10 @@ var base := {}            # the environment as the time of day made it
 var lamps_on := true
 var sounds := {}
 var texts := {}
+var ui_root: CanvasLayer          # the game's interface screens, in their 1280x720 space fitted to the screen
+var ui_layers := {}              # Uno name (ui_press_start, ...) -> UiLayer
+var ui_anims := {}               # Uno name -> the animation the script chose (ACTIVATE_UI)
+var ui_text := {}                # text box name -> text the script set before its screen came up
 var shake_t := 0.0
 var touch := {}           # finger index -> [start position, current position]
 var look_yaw := 0.0
@@ -126,8 +130,7 @@ func _process(delta: float) -> void:
 	_props()
 	_objects()
 	_shockwaves(delta)
-	main.prompt.visible = st.get("prompt", false)
-	main.logo.visible = st.get("prompt", false) or (cam_object == "" and entry == "RunCheckpointPrologue" and not pressed)
+	main.prompt.visible = st.get("prompt", false)   # (not drawn: the game's own screen shows it) whether start is wanted
 	if st.get("finished", false):
 		var done := entry
 		entry = ""
@@ -215,11 +218,25 @@ func _event(e: Dictionary) -> void:
 		"voice":
 			_voice(name)
 		"text":
-			brief.text = texts.get(name, "")
+			# the controller prompt's text box (tb_controller_prompt) shows it, in the game's own screen
+			var l = _ui("ui_controller_prompt")
+			if l != null:
+				ui_text["tb_controller_prompt"] = texts.get(name, "")
+				l.set_text("tb_controller_prompt", ui_text["tb_controller_prompt"])
+				brief.text = ""
+			else:
+				brief.text = texts.get(name, "")
 			prompt_id = name
 			prompt_yaw = look_yaw
 			prompt_pitch = look_pitch
+		"ui_on":
+			_ui_on(name)
+		"ui_anim":
+			_ui_anim(name, e["detail"])
 		"ui_off":
+			var l = ui_layers.get(_ui_name(name))
+			if l != null:
+				l.leave()
 			if name == "uno_controller_prompt":
 				brief.text = ""
 		"particles":
@@ -295,6 +312,12 @@ func _camera(delta: float, st: Dictionary) -> void:
 		_place(cam_t)
 	# the script's camera shake: amplitudes in radians; the waveform is this engine's (two sines per axis)
 	var sh: Vector3 = st.get("shake", Vector3.ZERO)
+	# for checks on the phone: where each camera shot looks from, every 2 seconds
+	if cam_playing and int(cam_t / 2.0) != int((cam_t - delta) / 2.0) or cam_playing and cam_t <= delta:
+		var tr: Transform3D = main.cam.global_transform
+		var par := game.mission_camera_parent(cam_object)
+		main._log("camera %s at %.1f s: from %s looking %s, fov %.0f%s" % [cam_file, cam_t, tr.origin.snapped(Vector3.ONE * 0.1),
+			(-tr.basis.z).snapped(Vector3.ONE * 0.01), main.cam.fov, (", riding at %s" % Vector3(par["position"]).snapped(Vector3.ONE * 0.1)) if not par.is_empty() else ""])
 	if sh != Vector3.ZERO:
 		shake_t += delta
 		var t := shake_t
@@ -328,6 +351,76 @@ func _place(t: float) -> void:
 
 func _g_vec(v: Vector3) -> Vector3:   # game cm (z up) to Godot metres
 	return Vector3(v.x, v.z, -v.y) * 0.01
+
+
+# ---- the game's interface screens -----------------------------------------------------------------------
+# The script names a screen by its proxy ("uno_press_start", "prxs_ui_black"); the screen itself is the Uno
+# scene "ui_press_start" of the intro pack.
+func _ui_name(object: String) -> String:
+	var n := object.trim_prefix("prxs_").trim_prefix("uno_")
+	return n if n.begins_with("ui_") else "ui_" + n
+
+
+func _ui(uname: String) -> UiLayer:
+	if ui_layers.has(uname):
+		return ui_layers[uname]
+	if ui_root == null:
+		ui_root = CanvasLayer.new()
+		ui_root.layer = 5
+		main.add_child(ui_root)
+		get_viewport().size_changed.connect(_fit_ui)
+	var l := UiLayer.new()
+	if not l.setup(game, uname):
+		main._log("interface screen not found: " + uname)
+		ui_layers[uname] = null
+		return null
+	l.visible = false
+	ui_root.add_child(l)
+	ui_layers[uname] = l
+	# text boxes whose text is in the scene's own properties (tb_press_start: u_menu_press_start_alt)
+	for tb in l.labels:
+		var props := game.mission_properties(tb)
+		var id = props.get("TextBox.text", "")
+		if id is String and id != "":
+			l.set_text(tb, texts.get(id, ""))
+		if ui_text.has(tb):
+			l.set_text(tb, ui_text[tb])
+	_fit_ui()
+	return l
+
+
+func _fit_ui() -> void:
+	if ui_root == null:
+		return
+	var vs := get_viewport().get_visible_rect().size
+	var k := vs.y / 720.0
+	ui_root.transform = Transform2D(0.0, Vector2(k, k), 0.0, Vector2((vs.x - 1280.0 * k) * 0.5, 0.0))
+
+
+func _ui_on(object: String) -> void:
+	var uname := _ui_name(object)
+	var l := _ui(uname)
+	if l == null:
+		return
+	var anims: Dictionary = l.data["anims"]
+	var a: String = ui_anims.get(uname, "")
+	if a == "" or not anims.has(a):
+		a = anims.keys()[0] if not anims.is_empty() else ""
+	var clips: Array = anims.get(a, [])
+	if clips.has("clip_in"):
+		l.play(a, "clip_in", "clip_on" if clips.has("clip_on") else "")
+	elif clips.has("clip_on"):
+		l.play(a, "clip_on", "", true)
+	else:
+		l.play(a, "")
+
+
+func _ui_anim(object: String, anim: String) -> void:
+	var uname := _ui_name(object)
+	ui_anims[uname] = anim
+	var l = ui_layers.get(uname)
+	if l != null and l.visible:
+		_ui_on(object)
 
 
 # ---- fills and times of day ------------------------------------------------------------------------------

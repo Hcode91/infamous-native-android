@@ -14,9 +14,10 @@ var t := 0.0
 var duration := 0.0
 var then_clip := ""        # played after the current one ends (clip_in -> clip_on)
 var loop := false
+var hide_at_end := false   # clip_off: hidden once it has played
 var labels := {}           # text box name -> Label
 
-static var font_cache: FontFile
+static var font_cache := {}   # pixel size -> FontFile
 
 
 func setup(g: InaGame, name: String) -> bool:
@@ -55,7 +56,7 @@ func setup(g: InaGame, name: String) -> bool:
 		lab.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		lab.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		lab.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		var f := game_font(g)
+		var f := game_font(g, int(tb["font_size"]))
 		if f != null:
 			lab.add_theme_font_override("font", f)
 		lab.add_theme_font_size_override("font_size", int(tb["font_size"]))
@@ -69,32 +70,49 @@ func setup(g: InaGame, name: String) -> bool:
 	return true
 
 
-# The game's main font (font_main_latin of the language pack) as a Godot bitmap font.
-static func game_font(g: InaGame) -> FontFile:
-	if font_cache != null:
-		return font_cache
+# The game's main font (font_main_latin of the language pack) as a Godot bitmap font at a pixel size: the
+# glyph sheet (drawn at a line height of 100) is scaled down once to that size, so small text stays smooth.
+static func game_font(g: InaGame, px: int = 28) -> FontFile:
+	if font_cache.has(px):
+		return font_cache[px]
 	var fd := g.ui_font("font_main_latin", "english")
 	if fd.is_empty() or fd["texture"] == null:
 		return null
 	var img: Image = (fd["texture"] as Texture2D).get_image()
 	img.decompress()
+	img.clear_mipmaps()
 	img.flip_y()   # stored bottom row first, like the interface's other textures
+	# the glyphs are a mask in the blue channel (alpha is empty): white letters shaped by that mask
+	img.convert(Image.FORMAT_RGBA8)
+	var w := img.get_width()
+	var h := img.get_height()
+	var data := img.get_data()
+	for i in range(0, w * h * 4, 4):
+		var m := data[i + 2]
+		data[i] = 255
+		data[i + 1] = 255
+		data[i + 2] = 255
+		data[i + 3] = m
+	img = Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, data)
 	var line: int = fd["line"]
+	var k := float(px) / float(line)
+	img.resize(maxi(1, int(round(w * k))), maxi(1, int(round(h * k))), Image.INTERPOLATE_LANCZOS)
 	var ff := FontFile.new()
-	var size := Vector2i(line, 0)
-	ff.fixed_size = line
+	var size := Vector2i(px, 0)
+	ff.fixed_size = px
 	ff.set_texture_image(0, size, 0, img)
-	var ascent := 80.0   # the space glyph's top sits at 80: the baseline
-	ff.set_cache_ascent(0, line, ascent)
-	ff.set_cache_descent(0, line, line - ascent)
+	var ascent := 80.0 * k   # the space glyph's top sits at 80: the baseline
+	ff.set_cache_ascent(0, px, ascent)
+	ff.set_cache_descent(0, px, px - ascent)
 	for gl in fd["glyphs"]:
 		var code: int = gl[0]
+		var r := Rect2(gl[1] * k, gl[2] * k, gl[3] * k, gl[4] * k)
 		ff.set_glyph_texture_idx(0, size, code, 0)
-		ff.set_glyph_uv_rect(0, size, code, Rect2(gl[1], gl[2], gl[3], gl[4]))
-		ff.set_glyph_size(0, size, code, Vector2(gl[3], gl[4]))
-		ff.set_glyph_offset(0, size, code, Vector2(gl[5], gl[6] - ascent))
-		ff.set_glyph_advance(0, line, code, Vector2(gl[7], 0))
-	font_cache = ff
+		ff.set_glyph_uv_rect(0, size, code, r)
+		ff.set_glyph_size(0, size, code, r.size)
+		ff.set_glyph_offset(0, size, code, Vector2(gl[5] * k, gl[6] * k - ascent))
+		ff.set_glyph_advance(0, px, code, Vector2(gl[7] * k, 0))
+	font_cache[px] = ff
 	return ff
 
 
@@ -108,6 +126,7 @@ func play(anim_name: String, clip_name: String, next_clip := "", looping := fals
 	clip = clip_name
 	then_clip = next_clip
 	loop = looping
+	hide_at_end = false
 	t = 0.0
 	visible = true
 	_pose()
@@ -127,7 +146,24 @@ func _process(delta: float) -> void:
 			t = fmod(t, duration)
 		else:
 			t = duration
+			if hide_at_end:
+				visible = false
+				clip = ""
+				return
 	_pose()
+
+
+# Plays the screen's way out (its clip_off), then hides it.
+func leave() -> void:
+	if not visible:
+		return
+	var a: Array = data["anims"].get(anim, [])
+	if a.has("clip_off"):
+		play(anim, "clip_off")
+		hide_at_end = true
+	else:
+		visible = false
+		clip = ""
 
 
 func _pose() -> void:
