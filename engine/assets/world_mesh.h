@@ -34,6 +34,10 @@ struct StaticMesh {
     std::vector<float> normalAmbient;
     std::vector<uint32_t> indices;        // triangle list
     uint32_t colorTextureOid = 0;         // the material's colour texture (0 when it has none)
+    // Colour matrix of the "hsv_shift" effects, row-major 3x3 (applied to the texture colour): the material
+    // keeps it at words 16-18, 20-22 and 24-26. It is circulant (a hue turn with a saturation and value scale),
+    // so one grey texture serves many coloured props. Identity for other effects.
+    std::array<float, 9> tint{1, 0, 0, 0, 1, 0, 0, 0, 1};
 };
 
 // Texture slots of a material object: slot number -> texture object id. Slot 0 is the colour map, 1 a decal

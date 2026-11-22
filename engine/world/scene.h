@@ -4,7 +4,9 @@
 #include "assets/world_mesh.h"
 
 #include <cstdint>
+#include <array>
 #include <map>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -22,6 +24,7 @@ struct SceneBatch {
     uint32_t textureOid = 0;      // 0: untextured
     DrawMode mode = DrawMode::Opaque;
     uint8_t layer = 0;            // decals: stacking order, drawn lowest first
+    std::array<float, 9> tint{1, 0, 0, 0, 1, 0, 0, 0, 1};   // colour matrix for the texture (see StaticMesh)
 };
 
 struct Scene {
@@ -49,8 +52,8 @@ private:
         std::vector<float> vertices;
         std::vector<uint32_t> indices;
     };
-    // by draw order (opaque, cutout, then decals by layer), then texture oid
-    std::map<std::pair<uint32_t, uint32_t>, Group> groups_;
+    // by draw order (opaque, cutout, then decals by layer), then texture oid, then colour matrix
+    std::map<std::tuple<uint32_t, uint32_t, std::array<float, 9>>, Group> groups_;
     std::vector<float> centers_;
     size_t pieces_ = 0, triangles_ = 0;
 };

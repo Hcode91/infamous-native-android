@@ -2,7 +2,7 @@
   "type": "include",
   "enabled_classes": [
     "Node", "Node3D", "MeshInstance3D", "GeometryInstance3D", "VisualInstance3D", "ArrayMesh", "Mesh",
-    "ShaderMaterial", "Material", "Shader", "Image", "ImageTexture", "Texture2D", "Texture", "Resource",
+    "ShaderMaterial", "Material", "Shader", "Image", "ImageTexture", "Cubemap", "ImageTextureLayered", "TextureLayered", "Texture2D", "Texture", "Resource",
     "RefCounted", "Object", "OmniLight3D", "Light3D", "OS", "FileAccess", "Engine", "ResourceLoader"
   ]
 }

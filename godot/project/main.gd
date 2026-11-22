@@ -13,7 +13,12 @@ var env: Environment
 var sun: DirectionalLight3D
 var ui: CanvasLayer
 var status: Label
-var prompt: Label
+var prompt: Control
+var plate: TextureRect
+var logo: TextureRect
+var music: AudioStreamPlayer
+var ambience: AudioStreamPlayer
+var game_folder := ""
 var folder_edit: LineEdit
 var manifest_edit: LineEdit
 var playing := false
@@ -102,26 +107,51 @@ func _search(dir: String, file: String, depth: int) -> String:
 func _make_ui() -> void:
 	ui = CanvasLayer.new()
 	add_child(ui)
-	# letterbox bars as in the original title (13% of the height each)
+	# letterbox bars as in the original title (11% of the height at the top, 15% at the bottom with the logo)
 	for top in [true, false]:
 		var bar := ColorRect.new()
 		bar.color = Color.BLACK
 		bar.anchor_left = 0.0
 		bar.anchor_right = 1.0
-		bar.anchor_top = 0.0 if top else 0.87
-		bar.anchor_bottom = 0.13 if top else 1.0
+		bar.anchor_top = 0.0 if top else 0.847
+		bar.anchor_bottom = 0.11 if top else 1.0
 		bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		ui.add_child(bar)
-	prompt = Label.new()
-	prompt.text = "Press the Start Button"
-	prompt.add_theme_font_size_override("font_size", 30)
-	prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	prompt.anchor_left = 0.0
-	prompt.anchor_right = 1.0
-	prompt.anchor_top = 0.17
-	prompt.anchor_bottom = 0.25
+	# the prompt sits on the menu selector's two smeared lines, near the top of the picture
+	prompt = Control.new()
+	prompt.anchor_left = 0.385
+	prompt.anchor_right = 0.615
+	prompt.anchor_top = 0.165
+	prompt.anchor_bottom = 0.295
+	prompt.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	prompt.visible = false
 	ui.add_child(prompt)
+	plate = TextureRect.new()
+	plate.set_anchors_preset(Control.PRESET_FULL_RECT)
+	plate.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	plate.stretch_mode = TextureRect.STRETCH_SCALE
+	plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	prompt.add_child(plate)
+	var text := Label.new()
+	text.text = "Press the Start Button"
+	text.add_theme_font_size_override("font_size", 22)
+	text.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+	text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	text.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	text.set_anchors_preset(Control.PRESET_FULL_RECT)
+	prompt.add_child(text)
+	# the game's logo, in the bottom bar
+	logo = TextureRect.new()
+	logo.anchor_left = 0.36
+	logo.anchor_right = 0.64
+	logo.anchor_top = 0.85
+	logo.anchor_bottom = 0.975
+	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	logo.flip_v = true   # the UI's textures are stored bottom row first
+	logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	logo.visible = false
+	ui.add_child(logo)
 	status = Label.new()
 	status.anchor_left = 0.02
 	status.anchor_top = 0.02
@@ -210,7 +240,19 @@ func _load(folder: String, manifest: String) -> void:
 	cam.make_current()
 	_place_camera(shot_clip, shot_time)
 	status.text = ""
+	var lt := game.texture("infamous_logo.psd", "msn_jb_intro.sprig.xpp")
+	if lt != null:
+		logo.texture = lt
+		logo.visible = true
+	var pt := game.texture("pause_item_selector.psd")
+	if pt != null:
+		plate.texture = pt
 	prompt.visible = true
+	if shot_path == "":
+		# Title music and the park at night. Which cues the game plays here is not read from its data yet:
+		# these are the files named for the start menu and for this park.
+		music = _play_mp3(folder + "/sounds/music/647_start_select_menu_temp.mp3", -2.0)
+		ambience = _play_mp3(folder + "/sounds/streaming_grains/8/i1_park_grnd_nite_nonpwrd.mp3", -10.0)
 	frames_after_load = 0
 
 
@@ -219,12 +261,38 @@ func _make_world(tod: Dictionary) -> void:
 	var haze: Color = tod.get("haze", Color(0.10, 0.17, 0.28))
 	env.background_mode = Environment.BG_COLOR
 	env.background_color = haze
+	# the time of day's sky: a cube texture in its sky pack, drawn around the camera
+	var sky_pack: String = tod.get("sky_pack", "")
+	if sky_pack != "":
+		var faces := game.cube_faces("cube_" + sky_pack + ".dds", sky_pack + ".xpp")
+		if faces.size() == 6:
+			var cm := Cubemap.new()
+			cm.create_from_images(faces)
+			var sh := Shader.new()
+			sh.code = """
+shader_type sky;
+uniform samplerCube cube : source_color, filter_linear;
+void sky() {
+	// Godot's (x, y, z) is the game's (x, z, -y)
+	vec3 d = vec3(EYEDIR.x, -EYEDIR.z, EYEDIR.y);
+	COLOR = texture(cube, d).rgb * 0.45;   // undoes most of the scene's exposure (matched by eye)
+}
+"""
+			var sm := ShaderMaterial.new()
+			sm.shader = sh
+			sm.set_shader_parameter("cube", cm)
+			var sky := Sky.new()
+			sky.sky_material = sm
+			env.background_mode = Environment.BG_SKY
+			env.sky = sky
+			env.fog_sky_affect = 0.5   # the sky shows through the haze near the top of the reference
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	# the game lights in gamma space (texture x light, then shown); Godot lights in linear space, so the
 	# game's light values are converted to keep the same result: light_linear = light ^ 2.2
 	env.ambient_light_color = _lin(tod.get("ambient", Color(0.5, 0.5, 0.5)))
 	env.ambient_light_energy = 1.0
 	env.tonemap_mode = Environment.TONE_MAPPER_LINEAR
+	env.tonemap_exposure = float(OS.get_environment("INA_EXPOSURE")) if OS.get_environment("INA_EXPOSURE") != "" else 2.2   # the game shows its scene brighter than its light values say (matched by eye)
 	# haze: the game's start and end distances, as depth fog
 	env.fog_enabled = true
 	env.fog_mode = Environment.FOG_MODE_DEPTH
@@ -232,7 +300,9 @@ func _make_world(tod: Dictionary) -> void:
 	env.fog_depth_begin = tod.get("haze_start", 45.0)
 	env.fog_depth_end = tod.get("haze_end", 100.0)
 	env.fog_depth_curve = 1.0
-	env.fog_density = 1.0
+	# the far city stays visible through the haze in the reference: the haze is capped (a guess, from the
+	# time of day's middle value)
+	env.fog_density = float(OS.get_environment("INA_FOG")) if OS.get_environment("INA_FOG") != "" else 0.6
 	# glow around lamps and bright surfaces (strength is a guess, to be matched to the reference)
 	env.glow_enabled = true
 	env.glow_intensity = 0.8
@@ -241,7 +311,7 @@ func _make_world(tod: Dictionary) -> void:
 	var we := WorldEnvironment.new()
 	we.environment = env
 	var attrs := CameraAttributesPractical.new()
-	attrs.dof_blur_far_enabled = true
+	attrs.dof_blur_far_enabled = OS.get_environment("INA_DOF") == "1"   # the reference is sharp; off unless asked
 	attrs.dof_blur_far_distance = 80.0
 	attrs.dof_blur_far_transition = 60.0
 	attrs.dof_blur_amount = 0.08
@@ -253,6 +323,30 @@ func _make_world(tod: Dictionary) -> void:
 	sun.light_energy = pow(0.35, 2.2)   # most of the sun is baked into the city's ambient values; a guess for the rest
 	add_child(sun)
 	sun.look_at_from_position(Vector3.ZERO, -to_sun, Vector3.UP if abs(to_sun.y) < 0.99 else Vector3.FORWARD)
+
+
+func _play_mp3(path: String, db: float) -> AudioStreamPlayer:
+	if not FileAccess.file_exists(path):
+		print("missing ", path)
+		return null
+	var st := AudioStreamMP3.load_from_file(path)
+	if st == null:
+		return null
+	st.loop = true
+	var p := AudioStreamPlayer.new()
+	p.stream = st
+	p.volume_db = db
+	add_child(p)
+	p.play()
+	return p
+
+
+func _fade_out(p: AudioStreamPlayer, secs: float) -> void:
+	if p == null:
+		return
+	var tw := create_tween()
+	tw.tween_property(p, "volume_db", -60.0, secs)
+	tw.tween_callback(p.queue_free)
 
 
 func _lin(c: Color) -> Color:
@@ -280,6 +374,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		playing = true
 		play_t = 0.0
 		prompt.visible = false
+		logo.visible = false
+		_fade_out(music, 1.5)
+		music = null
 
 
 func _process(delta: float) -> void:

@@ -89,8 +89,8 @@ std::vector<WorldLight> readSectorLights(const Pack& pack, const ScriptImage& im
 Scene buildSectorProps(const Pack& sector, const Pack* core, const std::vector<std::string>& names, const float offset[3],
                        size_t* placed,
                        const std::vector<std::string>* skipContaining) {
-    struct Group { DrawMode mode; uint8_t layer; uint32_t texture; std::vector<float> vertices; std::vector<uint32_t> indices; };
-    std::map<std::tuple<int, int, uint32_t>, Group> groups;
+    struct Group { DrawMode mode; uint8_t layer; uint32_t texture; std::array<float, 9> tint; std::vector<float> vertices; std::vector<uint32_t> indices; };
+    std::map<std::tuple<int, int, uint32_t, std::array<float, 9>>, Group> groups;
     std::map<uint32_t, Scene> models;   // by prototype name
     size_t count = 0;
     for (const SectorInstance& in : readSectorInstances(sector, names.size())) {
@@ -117,10 +117,11 @@ Scene buildSectorProps(const Pack& sector, const Pack* core, const std::vector<s
         }
         count++;
         for (const SceneBatch& b : model.batches) {
-            Group& g = groups[{int(b.mode), int(b.layer), b.textureOid}];
+            Group& g = groups[{int(b.mode), int(b.layer), b.textureOid, b.tint}];
             g.mode = b.mode;
             g.layer = b.layer;
             g.texture = b.textureOid;
+            g.tint = b.tint;
             // copy the batch's vertices (each batch has its own run of them) moved to the entity's place
             std::map<uint32_t, uint32_t> remap;
             for (uint32_t i = 0; i < b.indexCount; i++) {
@@ -149,6 +150,7 @@ Scene buildSectorProps(const Pack& sector, const Pack* core, const std::vector<s
         b.firstIndex = uint32_t(out.indices.size());
         b.indexCount = uint32_t(g.indices.size());
         b.textureOid = g.texture;
+        b.tint = g.tint;
         b.mode = g.mode;
         b.layer = g.layer;
         out.batches.push_back(b);

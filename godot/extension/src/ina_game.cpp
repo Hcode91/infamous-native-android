@@ -15,6 +15,8 @@
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 
 #include <algorithm>
+#include <array>
+#include <tuple>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -54,9 +56,11 @@ shader_type spatial;
 render_mode cull_disabled, depth_draw_opaque;
 uniform sampler2D tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform bool has_tex = true;
+uniform mat3 tint = mat3(1.0);
+vec3 tinted(vec3 c) { return pow(max(tint * pow(c, vec3(1.0 / 2.2)), vec3(0.0)), vec3(2.2)); }
 void fragment() {
     vec4 c = has_tex ? texture(tex, UV) : vec4(0.6, 0.6, 0.6, 1.0);
-    ALBEDO = c.rgb;
+    ALBEDO = tinted(c.rgb);
     AO = pow(COLOR.r, 2.2);
     AO_LIGHT_AFFECT = 0.0;
     ROUGHNESS = 0.85;
@@ -68,9 +72,11 @@ shader_type spatial;
 render_mode cull_disabled, depth_draw_opaque;
 uniform sampler2D tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform bool has_tex = true;
+uniform mat3 tint = mat3(1.0);
+vec3 tinted(vec3 c) { return pow(max(tint * pow(c, vec3(1.0 / 2.2)), vec3(0.0)), vec3(2.2)); }
 void fragment() {
     vec4 c = has_tex ? texture(tex, UV) : vec4(0.6, 0.6, 0.6, 1.0);
-    ALBEDO = c.rgb;
+    ALBEDO = tinted(c.rgb);
     ALPHA = c.a;
     ALPHA_SCISSOR_THRESHOLD = 0.5;
     AO = pow(COLOR.r, 2.2);
@@ -84,9 +90,11 @@ shader_type spatial;
 render_mode cull_disabled, blend_mix, depth_draw_never;
 uniform sampler2D tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform bool has_tex = true;
+uniform mat3 tint = mat3(1.0);
+vec3 tinted(vec3 c) { return pow(max(tint * pow(c, vec3(1.0 / 2.2)), vec3(0.0)), vec3(2.2)); }
 void fragment() {
     vec4 c = has_tex ? texture(tex, UV) : vec4(0.6, 0.6, 0.6, 0.0);
-    ALBEDO = c.rgb;
+    ALBEDO = tinted(c.rgb);
     ALPHA = c.a;
     AO = pow(COLOR.r, 2.2);
     AO_LIGHT_AFFECT = 0.0;
@@ -98,9 +106,11 @@ shader_type spatial;
 render_mode cull_disabled, unshaded;
 uniform sampler2D tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform bool has_tex = true;
+uniform mat3 tint = mat3(1.0);
+vec3 tinted(vec3 c) { return pow(max(tint * pow(c, vec3(1.0 / 2.2)), vec3(0.0)), vec3(2.2)); }
 void fragment() {
     vec4 c = has_tex ? texture(tex, UV) : vec4(0.6, 0.6, 0.6, 1.0);
-    ALBEDO = c.rgb;
+    ALBEDO = tinted(c.rgb);
     ALPHA = c.a;
     ALPHA_SCISSOR_THRESHOLD = 0.5;
 }
@@ -132,7 +142,7 @@ struct InaGame::Impl {
     std::map<uint32_t, ina::TextureInfo> coreTex, cityTex;
     std::map<uint64_t, Ref<ImageTexture>> textures;
     Ref<Shader> shaders[4];   // lit, cutout, decal, prelit
-    std::map<std::pair<int, uint64_t>, Ref<ShaderMaterial>> materials;
+    std::map<std::tuple<int, uint64_t, std::array<float, 9>>, Ref<ShaderMaterial>> materials;
     // the opening's camera
     std::string introClipName;
     bool introRead = false, introOk = false;
@@ -144,7 +154,63 @@ struct InaGame::Impl {
 InaGame::InaGame() : d_(std::make_unique<Impl>()) {}
 InaGame::~InaGame() = default;
 
+Ref<ImageTexture> InaGame::texture(const String& name, const String& pack) {
+    const std::string want = name.utf8().get_data();
+    auto find = [&](const ina::Pack& p) -> Ref<ImageTexture> {
+        for (const ina::TextureInfo& t : p.textures())
+            if (t.oid < d_->names.size() && d_->names[t.oid] == want) {
+                const ina::Image im = ina::decodeTexture(p, t);
+                PackedByteArray bytes;
+                bytes.resize(int64_t(im.rgba.size()));
+                memcpy(bytes.ptrw(), im.rgba.data(), im.rgba.size());
+                Ref<Image> image = Image::create_from_data(int32_t(im.width), int32_t(im.height), false, Image::FORMAT_RGBA8, bytes);
+                if (image.is_null()) return Ref<ImageTexture>();
+                image->generate_mipmaps();
+                return ImageTexture::create_from_image(image);
+            }
+        return Ref<ImageTexture>();
+    };
+    try {
+        if (!pack.is_empty()) {
+            const auto bytes = readPack(pack.utf8().get_data());
+            if (!bytes.empty()) {
+                ina::Pack p(bytes);
+                Ref<ImageTexture> t = find(p);
+                if (t.is_valid()) return t;
+            }
+        }
+        if (d_->core) return find(*d_->core);
+    } catch (const std::exception&) {
+    }
+    return Ref<ImageTexture>();
+}
+
+Array InaGame::cube_faces(const String& name, const String& pack) {
+    Array out;
+    const std::string want = name.utf8().get_data();
+    try {
+        const auto bytes = readPack(pack.utf8().get_data());
+        if (bytes.empty()) return out;
+        ina::Pack p(bytes);
+        for (const ina::TextureInfo& t : p.textures()) {
+            if (!t.cube || t.oid >= d_->names.size() || d_->names[t.oid] != want) continue;
+            for (uint32_t f = 0; f < 6; f++) {
+                const ina::Image im = ina::decodeTexture(p, t, f, 0);
+                PackedByteArray b;
+                b.resize(int64_t(im.rgba.size()));
+                memcpy(b.ptrw(), im.rgba.data(), im.rgba.size());
+                out.push_back(Image::create_from_data(int32_t(im.width), int32_t(im.height), false, Image::FORMAT_RGBA8, b));
+            }
+            break;
+        }
+    } catch (const std::exception&) {
+    }
+    return out;
+}
+
 void InaGame::_bind_methods() {
+    ClassDB::bind_method(D_METHOD("cube_faces", "name", "pack"), &InaGame::cube_faces);
+    ClassDB::bind_method(D_METHOD("texture", "name", "pack"), &InaGame::texture, DEFVAL(String()));
     ClassDB::bind_method(D_METHOD("open", "folder", "manifest"), &InaGame::open, DEFVAL(String()));
     ClassDB::bind_method(D_METHOD("build_city", "x", "y", "near_radius", "radius", "far_city"), &InaGame::build_city);
     ClassDB::bind_method(D_METHOD("time_of_day", "name"), &InaGame::time_of_day);
@@ -254,7 +320,7 @@ Node3D* InaGame::build_city(double x, double y, double near_radius, double radiu
                 // Wreckage of the blast (statue pieces, debris, gravel, cinder blocks, abandoned cars) is placed in the
                 // same tables as the street furniture; the title is before the blast, so it is left out by name until
                 // the game's own switch for it is found.
-                static const std::vector<std::string> skip = {"statue", "debris", "gravel", "cinder", "blocker", "two_by_four", "boulder"};
+                static const std::vector<std::string> skip = {"statue", "debris", "gravel", "cinder", "blocker", "two_by_four", "boulder", "lights_column", "artdeco_gate"};
                 props.scene = ina::buildSectorProps(p, d_->core.get(), d_->names, centre, nullptr, &skip);
                 if (!props.scene.vertices.empty()) b.chunks.push_back(std::move(props));
                 try {
@@ -291,6 +357,13 @@ Node3D* InaGame::build_city(double x, double y, double near_radius, double radiu
             const size_t nv = s.vertices.size() / ina::kVertexFloats;
             for (size_t bi = 0; bi < s.batches.size(); bi++) {
                 const ina::SceneBatch& batch = s.batches[bi];
+                if (mesh->get_surface_count() >= 250) {   // Godot allows 256 surfaces per mesh
+                    MeshInstance3D* part = memnew(MeshInstance3D);
+                    part->set_mesh(mesh);
+                    root->add_child(part);
+                    meshes++;
+                    mesh.instantiate();
+                }
                 if (batch.mode == ina::DrawMode::Invisible || !batch.indexCount) continue;
                 // the batch's vertices, renumbered
                 std::vector<int32_t> remap(nv, -1);
@@ -333,13 +406,36 @@ Node3D* InaGame::build_city(double x, double y, double near_radius, double radiu
                 tris += size_t(idx.size()) / 3;
                 const int kind = prelit ? 3 : batch.mode == ina::DrawMode::Cutout ? 1 : batch.mode == ina::DrawMode::Decal ? 2 : 0;
                 const uint64_t key = bi < ch.textureKeys.size() ? ch.textureKeys[bi] : 0;
-                Ref<ShaderMaterial>& mat = d_->materials[{kind, key}];
+                Ref<ShaderMaterial>& mat = d_->materials[{kind, key, batch.tint}];
+                if (getenv("INA_DEBUG_TEX") && key) {
+                    const Vector3 c = pos[0];
+                    const Vector3 eye = toGodot(std::array<float, 3>{float(x), float(y), 0.0f}.data());
+                    const uint32_t oid = uint32_t(key);
+                    auto it = d_->textures.find(key);
+                    Color avg;
+                    if (it != d_->textures.end() && it->second.is_valid()) {
+                        Ref<Image> im = it->second->get_image();
+                        const int w = im->get_width(), h = im->get_height();
+                        for (int yy = 0; yy < 8; yy++)
+                            for (int xx = 0; xx < 8; xx++) avg += im->get_pixel(xx * w / 8, yy * h / 8) / 64.0f;
+                    }
+                    if ((c - eye).length() < 40.0f)
+                        log += "tex " + (oid < d_->names.size() ? d_->names[oid] : std::to_string(oid)) + " kind " + std::to_string(kind) +
+                               " avg " + std::to_string(avg.r) + "," + std::to_string(avg.g) + "," + std::to_string(avg.b) + " at " +
+                               std::to_string(c.x) + "," + std::to_string(c.y) + "," + std::to_string(c.z) + "\n";
+                }
                 if (mat.is_null()) {
                     mat.instantiate();
                     mat->set_shader(d_->shaders[kind]);
                     auto it = d_->textures.find(key);
                     const bool has = key && it != d_->textures.end() && it->second.is_valid();
+                    if (!has && getenv("INA_DEBUG_TEX"))
+                        log += "no texture: kind " + std::to_string(kind) + " key " + std::to_string(key) + " tris " +
+                               std::to_string(idx.size() / 3) + " at " + std::to_string(pos[0].x) + "," + std::to_string(pos[0].y) + "," + std::to_string(pos[0].z) + "\n";
                     mat->set_shader_parameter("has_tex", has);
+                    // Godot's mat3 takes columns; the game's matrix is stored by rows
+                    const auto& t = batch.tint;
+                    mat->set_shader_parameter("tint", Basis(Vector3(t[0], t[3], t[6]), Vector3(t[1], t[4], t[7]), Vector3(t[2], t[5], t[8])));
                     if (has) mat->set_shader_parameter("tex", it->second);
                     if (kind == 2) mat->set_render_priority(std::min<int>(batch.layer, 100));
                 }
@@ -352,6 +448,7 @@ Node3D* InaGame::build_city(double x, double y, double near_radius, double radiu
             meshes++;
         }
         for (const ina::WorldLight& l : b.lights) {
+            if (getenv("INA_NO_LAMPS")) break;
             OmniLight3D* o = memnew(OmniLight3D);
             o->set_position(toGodot(l.position));
             o->set_color(Color(std::min(l.color[0], 1.0f), std::min(l.color[1], 1.0f), std::min(l.color[2], 1.0f)));

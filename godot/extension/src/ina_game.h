@@ -2,6 +2,7 @@
 // (meshes, textures, lamps), reads a time of day and the opening's camera. Coordinates are converted from
 // the game's (centimetres, z up) to Godot's (metres, y up): (x, y, z) -> (x, z, -y) / 100.
 #pragma once
+#include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
@@ -41,6 +42,12 @@ public:
     godot::Dictionary intro_camera(const godot::String& clip, double t);
     // Log of the last call (timings, counts).
     godot::String last_log() const { return log_; }
+    // A texture by its name (e.g. "infamous_logo.psd") from the pack `pack` (e.g. "msn_jb_intro.sprig.xpp")
+    // or, failing that, the shared pack. Null when not found.
+    godot::Ref<godot::ImageTexture> texture(const godot::String& name, const godot::String& pack);
+    // The six faces of a cube texture (e.g. "cube_skybox_predawn.dds" in "skybox_predawn.xpp"), in the
+    // stored order (+x, -x, +y, -y, +z, -z of the game's space, z up). Empty when not found.
+    godot::Array cube_faces(const godot::String& name, const godot::String& pack);
 
 protected:
     static void _bind_methods();

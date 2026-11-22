@@ -53,7 +53,8 @@ std::vector<std::pair<uint32_t, uint32_t>> readMaterialTextures(const Pack& pack
     for (uint32_t i = 0; i < count; i++) {
         const size_t e = size_t(entries) + size_t(i) * 28;
         const uint32_t flags = pack.word(e + 12);
-        if (pack.word(e + 8) != materialOffset || (flags & 0xFFFFFF) != 0x101) continue;
+        // the low half is 0x101; the next byte is 0 in the core pack's materials and 1 in many sector props
+        if (pack.word(e + 8) != materialOffset || (flags & 0xFFFF) != 0x101) continue;
         out.emplace_back(flags >> 24, pack.word(e));
     }
     return out;
@@ -205,9 +206,23 @@ int decodeMesh(const Pack& pack, size_t rec, const Pack& src, const uint32_t str
         for (size_t i = 0; i < bySize.size() && !decoded; i++) decoded = tryLayout(*bySize[i], false);
     }
     if (!decoded) return 0;
-    for (const auto& [slot, oid] : readMaterialTextures(pack, m.materialOffset)) {
-        if (slot == 0) { m.colorTextureOid = oid; break; }
-        if (slot == 1 && m.colorTextureOid == 0) m.colorTextureOid = oid;
+    // colour map: slot 0, else the decal colour map (1), else slot 2 (the self-lit masks: signs, lamp glass)
+    uint32_t bySlot[3] = {0, 0, 0};
+    for (const auto& [slot, oid] : readMaterialTextures(pack, m.materialOffset))
+        if (slot < 3 && !bySlot[slot]) bySlot[slot] = oid;
+    m.colorTextureOid = bySlot[0] ? bySlot[0] : bySlot[1] ? bySlot[1] : bySlot[2];
+    if (effect.find("hsv_shift") != std::string::npos && size_t(m.materialOffset) + 27 * 4 <= head.size()) {
+        bool ok = true;
+        std::array<float, 9> t{};
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++) {
+                const uint32_t w = pack.word(size_t(m.materialOffset) + size_t(16 + 4 * r + c) * 4);
+                float f;
+                std::memcpy(&f, &w, 4);
+                ok = ok && std::isfinite(f) && std::fabs(f) < 8.0f;
+                t[size_t(3 * r + c)] = f;
+            }
+        if (ok) m.tint = t;
     }
     return 1;
 }

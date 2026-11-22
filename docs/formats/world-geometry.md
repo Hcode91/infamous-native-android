@@ -45,9 +45,15 @@ last four bytes. Otherwise they are 8 bytes into the second stream, whose vertex
 
 **Materials.** The record's material pointer leads to a shader object. Its word 8 points at an array of
 texture entries and word 9 is their count. An entry is 7 words: texture object id, 0, a pointer back to the
-material, `slot << 24 | 0x101`, sampler state, 0, 0. In the materials examined, slot 0 is the colour map,
-1 a decal colour map, 3 the normal map and 4 the specular map. Textures are found by object id in the
-sector's own pack or in the shared pack `core.xpp`.
+material, `slot << 24 | n << 16 | 0x101` (n is 0 in the shared pack's materials and often 1 in the props
+of sector packs), sampler state, 0, 0. In the materials examined, slot 0 is the colour map, 1 a decal colour
+map, 3 the normal map and 4 the specular map. Textures are found by object id in the sector's own pack or in
+the shared pack `core.xpp`.
+
+Materials whose effect name ends in `hsv_shift` colour their texture with a 3x3 matrix kept at words
+16-18, 20-22 and 24-26 (rows padded to four words). The matrix is circulant, `[[a b c] [c a b] [b c a]]`,
+which is a turn of hue around the grey axis together with a scale; one grey texture so serves props of many
+colours. The plugin applies it to the texture colour in gamma space.
 
 **Placement.** Mesh positions are in the mesh's own coordinates. A static object (class `CID_SoData`,
 id 0x168 in the EU disc release) puts its meshes in place with three tables, each a pointer and a count:

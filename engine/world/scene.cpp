@@ -11,7 +11,7 @@ void SceneBuilder::add(const StaticMesh& m, const float tm[12], const float offs
     DrawMode mode = layer ? DrawMode::Decal : m.mode;
     // order: 0 opaque, 1 cutout, 2 + layer for decals
     const uint32_t order = mode == DrawMode::Decal ? 2u + layer : (mode == DrawMode::Cutout ? 1u : 0u);
-    Group& g = groups_[{order, m.uvs.empty() ? 0u : m.colorTextureOid}];
+    Group& g = groups_[{order, m.uvs.empty() ? 0u : m.colorTextureOid, m.tint}];
     std::vector<float> placed(nv * 3);
     float sum[3] = {0, 0, 0};
     for (size_t v = 0; v < nv; v++) {
@@ -79,9 +79,11 @@ Scene SceneBuilder::finish() {
         SceneBatch b;
         b.firstIndex = uint32_t(s.indices.size());
         b.indexCount = uint32_t(g.indices.size());
-        b.textureOid = key.second;
-        b.mode = key.first >= 2 ? DrawMode::Decal : (key.first == 1 ? DrawMode::Cutout : DrawMode::Opaque);
-        b.layer = key.first >= 2 ? uint8_t(key.first - 2) : 0;
+        const uint32_t order = std::get<0>(key);
+        b.textureOid = std::get<1>(key);
+        b.tint = std::get<2>(key);
+        b.mode = order >= 2 ? DrawMode::Decal : (order == 1 ? DrawMode::Cutout : DrawMode::Opaque);
+        b.layer = order >= 2 ? uint8_t(order - 2) : 0;
         s.batches.push_back(b);
         for (size_t v = 0; v + kVertexFloats <= g.vertices.size(); v += kVertexFloats) {
             for (int c = 0; c < 3; c++) {
