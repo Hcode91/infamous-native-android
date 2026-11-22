@@ -21,6 +21,7 @@ var ambience: AudioStreamPlayer
 var game_folder := ""
 var city_node: Node3D
 var autostart := false
+var start_entry := ""
 var opening_shots: Array = []   # opening times (s) to save frames at, for checks
 var opening_t := -1.0
 var folder_edit: LineEdit
@@ -48,6 +49,7 @@ func _ready() -> void:
 	shot_time = float(args.get("time", "0"))
 	shot_clip = args.get("clip", "init")
 	autostart = args.has("autostart")
+	start_entry = args.get("entry", "")
 	if args.has("shots"):
 		for x in String(args["shots"]).split(","):
 			opening_shots.append(float(x))
@@ -518,17 +520,32 @@ func _start_director() -> void:
 	add_child(director)
 	director.setup(self)
 	director.mission_finished.connect(_on_mission_finished)
+	if start_entry != "" and start_entry != "RunCheckpointPrologue":
+		_to_crater(start_entry, false)   # straight to a later part (for checks)
+		return
 	director.start("RunCheckpointPrologue")
+
+
+# the mission's checkpoints in the order the game plays them
+const CHECKPOINTS := ["RunCheckpointPrologue", "RunCheckpointIntro", "RunCheckpointBlastCrater", "RunCheckpointGarageIntro",
+	"RunCheckpointGarageMidpoint", "RunCheckpointParkingGarage", "RunCheckpointBridge", "RunCheckpointOutro"]
 
 
 func _on_mission_finished(entry: String) -> void:
 	if entry != "RunCheckpointPrologue":
+		var i := CHECKPOINTS.find(entry)
+		if i >= 0 and i + 1 < CHECKPOINTS.size():
+			director.start(CHECKPOINTS[i + 1])
 		return
-	# after the blast: the logo card while the crater is built, then the next part of the mission
+	_to_crater("RunCheckpointIntro", true)
+
+
+# After the blast: the logo card while the crater is built, then the next part of the mission.
+func _to_crater(next_entry: String, logo_card: bool) -> void:
 	var out := []
 	var task := WorkerThreadPool.add_task(func(): out.append(game.build_city(GROUND_ZERO.x, GROUND_ZERO.y, near_radius, 26000.0, true, true)))
 	var logo_path := game_folder + "/movies/cutscene/infamous_logo.bik"
-	if FileAccess.file_exists(logo_path):
+	if logo_card and FileAccess.file_exists(logo_path):
 		var card := BinkPlayer.new()
 		add_child(card)
 		if card.play(logo_path, -1) == "":
@@ -550,4 +567,4 @@ func _on_mission_finished(entry: String) -> void:
 	add_child(director)
 	director.setup(self)
 	director.mission_finished.connect(_on_mission_finished)
-	director.start("RunCheckpointIntro")
+	director.start(next_entry)

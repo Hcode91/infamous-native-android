@@ -102,6 +102,7 @@ void BasicScriptHost::property(ScriptCall& c) {
         }
     } else {
         // A value nobody supplies reads as zero; an object reads as a placeholder so scripts that test it carry on.
+        if (onUnhandled) onUnhandled("get " + (obj.empty() ? describe(*c.machine, c.object) : obj) + " " + member);
         memset(c.value, 0, scriptTypeSize(c.type));
         if ((c.type & 0x8000) || !((c.type >> 12) & 3)) return;
         const uint32_t h = c.machine->newHandle();

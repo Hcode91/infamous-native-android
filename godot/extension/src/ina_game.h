@@ -70,7 +70,10 @@ protected:
     godot::Array mission_events();                // {kind, name, detail, position (Godot space) or null, value}
     godot::PackedStringArray mission_unhandled(); // requests nothing handled, as text
     void mission_label(const godot::String& name);
-    void mission_voice_done();                    // the voice line the script started has finished
+    void mission_voice_done();
+    void mission_sticks(godot::Vector2 left, godot::Vector2 right);   // -1..1, up is -1
+    void mission_in_view(bool in_view);
+    void mission_player(godot::Vector3 position);   // where the player is (Godot space)           // what the player is asked to look at is in view                    // the voice line the script started has finished
     void mission_camera_done(const godot::String& camera);
     godot::Array mission_props();                 // {handle, model, wrecked, position, rotation (Quaternion)}
     godot::Node3D* mission_model(const godot::String& model, bool wrecked);

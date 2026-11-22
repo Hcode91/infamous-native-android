@@ -333,6 +333,8 @@ float ScriptedMission::rand01() {
 }
 
 std::string ScriptedMission::fileFor(const std::string& object) const {
+    const auto al = alias_.find(object);
+    if (al != alias_.end()) return al->second;
     if (scriptObjects_.count(object)) return object;
     const std::string x = object.rfind("prxs_", 0) == 0 ? object.substr(5) : object;
     if (scriptObjects_.count(x)) return x;
@@ -388,6 +390,11 @@ void ScriptedMission::hook() {
     host_->onMethod = [self, name](ScriptCall& c, const std::string& objectIn, const std::string& member) {
         const std::string object = self->nameOf(c, objectIn);
         const std::string what = after(member);
+        if (what == "MATCH_OBJECT" && object.empty() && c.object == 0 && c.args.size() >= 4) {   // the hero put somewhere
+            const auto at = self->placed.find(self->host_->objectName(*c.machine, c.argWord(0)));
+            if (at != self->placed.end()) self->emit("hero_at", self->host_->objectName(*c.machine, c.argWord(0)), "", at->second.pos);
+            return true;
+        }
         if (member.rfind("ShockwaveEffect.", 0) == 0) {   // a shockwave set up on a spawned handle
             Shockwave& w = self->shockwaves[c.object];
             if (what == "COLOR" && c.args.size() >= 16) {
@@ -419,6 +426,17 @@ void ScriptedMission::hook() {
             if (what == "UNTRIGGER") { self->fills.untrigger(object); self->emit("fill_off", object); return true; }
             if (what == "STOP") { self->fills.stop(object, c.argFloat(0)); self->emit("fill_off", object, "", nullptr, c.argFloat(0)); return true; }
         }
+        if (member == "VolumeButton.ADD") {   // a place the player is to reach
+            const auto at = self->placed.find(object);
+            self->emit("goal", object, "", at != self->placed.end() ? at->second.pos : nullptr);
+            return true;
+        }
+        if (member == "View.INSIDE_FRUSTUM") {
+            // whether the object the player is asked to look at is in view; the objects (the helicopter, the
+            // looters) are not animated yet, so the front end answers from where the prompt asks to look
+            c.resultBool(self->inView);
+            return true;
+        }
         if (member == "Event.SIGNAL") {
             float delay = c.args.size() >= 4 ? c.argFloat(0) : 0;
             if (!(delay >= 0 && delay < 60)) delay = 0;
@@ -426,8 +444,10 @@ void ScriptedMission::hook() {
             return true;
         }
         if (member.rfind("Uno.", 0) == 0) {   // a screen of the game's interface
-            if (what == "trigger") { self->prompt = true; self->emit("ui_on", object); return true; }
-            if (what == "UNTRIGGER" || what == "REMOVE") { self->prompt = false; self->emit("ui_off", object); return true; }
+            const bool title = object.find("press_start") != std::string::npos;   // the title's prompt
+            if (what == "trigger") { if (title) self->prompt = true; self->emit("ui_on", object); return true; }
+            if (what == "UNTRIGGER" || what == "REMOVE") { if (title) self->prompt = false; self->emit("ui_off", object); return true; }
+            if (what == "ACTIVATE_UI" || what == "DEACTIVATE_UI") return true;
         }
         if (member == "TodApply.SET_LERP") {   // blend weight of a time of day the script created
             auto it = self->tods.find(c.object);
@@ -544,6 +564,22 @@ void ScriptedMission::hook() {
         // The camera objects are animation players: the front end plays the camera file's clip, the script
         // waits for it to end and gets its named moments as labels.
         if (object.find("camera") != std::string::npos) {
+            // a camera whose file is not named after it: the camera file whose script has the method called
+            if (self->fileFor(object).empty()) {
+                uint32_t fn = 0;
+                for (uint32_t i = 0; i < self->names_.size(); i++) if (self->names_[i] == member) { fn = i; break; }
+                for (const auto& [n, cls] : self->scriptObjects_) {
+                    if (n.find("camera") == std::string::npos) continue;
+                    bool claimed = false;
+                    for (const auto& [o, f] : self->alias_) claimed = claimed || f == n;
+                    if (claimed) continue;
+                    for (int k : cls) {
+                        self->vm_->instance(size_t(k));
+                        if (fn && self->vm_->findFunction(size_t(k), fn)) { self->alias_[object] = n; break; }
+                    }
+                    if (self->alias_.count(object)) break;
+                }
+            }
             if (member == "DtPlayTime" || member == "VecDOFCur") return true;   // values the camera would report
             if (member == "OnStart") {
                 self->cameraDone_[object] = false;
@@ -688,6 +724,7 @@ void ScriptedMission::hook() {
             c.thread->yielded = true;
             return true;
         }
+        if (fn == "WaitForSnd" || fn == "SetInvertCameraVert" || fn == "PosConvert") return true;   // sound effects are not played yet: nothing to wait for
         if (fn == "ObjFind" && c.args.size() >= 8) {   // an object of the world by name: a handle that remembers it
             const uint32_t h = c.machine->newHandle();
             self->found_[h] = name(c.argWord(1));
@@ -744,6 +781,30 @@ void ScriptedMission::hook() {
             readVec(c.value, v);
             const float d = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
             self->joltStrength_ = std::clamp(1.0f - d / self->joltRadius_, 0.0f, 1.0f);
+            return true;
+        }
+        if (!c.isSet && member.rfind("JoyStickThunk.", 0) == 0 && scriptTypeSize(c.type) == 4) {   // the sticks, -1..1 (up is -1)
+            const std::string a = what;
+            const float v = a == "X1" ? self->stick[0] : a == "Y1" ? self->stick[1] : a == "X2" ? self->stick[2] : a == "Y2" ? self->stick[3] : 0.0f;
+            uint32_t w;
+            std::memcpy(&w, &v, 4);
+            putBe32(c.value, w);
+            return true;
+        }
+        if (!c.isSet && member == "VolumeButton.IS_TRIGGERED") {
+            // the player has walked into the volume: within its radius of where it is placed (the volumes' own
+            // shapes are not read yet; 10 m)
+            const auto at = self->placed.find(object);
+            bool in = false;
+            if (at != self->placed.end() && self->playerKnown) {
+                const float dx = self->player[0] - at->second.pos[0], dy = self->player[1] - at->second.pos[1];
+                in = dx * dx + dy * dy < 1000.0f * 1000.0f && std::fabs(self->player[2] - at->second.pos[2]) < 1500.0f;
+            }
+            c.value[0] = in ? 1 : 0;
+            return true;
+        }
+        if (!c.isSet && member == "Sound.IS_PLAYING") {   // a voice line still playing
+            c.value[0] = self->voiceDone_ ? 0 : 1;
             return true;
         }
         if (c.isSet && member == "TextBox.text") {   // a text box of the interface gets a string of the game's text

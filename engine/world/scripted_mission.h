@@ -33,6 +33,10 @@ public:
 
     // Input and the front end's reports
     bool buttonPressed = false;
+    float stick[4] = {0, 0, 0, 0};              // left x, y, right x, y (-1..1, up is -1)
+    bool inView = false;
+    float player[3] = {0, 0, 0};                // where the player is (game space)
+    bool playerKnown = false;                        // the thing the player is asked to look at is in view
     void cameraFinished(const std::string& camera);
     void label(const std::string& name);        // a camera clip reached one of its named moments
 
@@ -126,6 +130,7 @@ private:
     // the instance scopes the machine made for them, so their own engine requests can be told apart.
     std::map<std::string, std::vector<int>> scriptObjects_;
     std::map<std::string, Scene> fileScenes_;
+    std::map<std::string, std::string> alias_;                // object -> the proxy file found for it by its methods
     std::map<uint32_t, std::string> found_;                   // handles from ObjFind, by the name looked for
     std::map<uint32_t, std::string> scopeNames_;
     bool runObjectScript(ScriptCall& c, const std::string& object, const std::string& member, bool wait = true);

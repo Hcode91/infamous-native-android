@@ -40,6 +40,10 @@ var lamps_on := true
 var sounds := {}
 var texts := {}
 var shake_t := 0.0
+var touch := {}           # finger index -> [start position, current position]
+var look_yaw := 0.0
+var look_base := Transform3D()
+var look_pitch := 0.0
 
 
 func setup(scene: Node3D) -> void:
@@ -93,6 +97,10 @@ func _capture_base() -> void:
 
 func start(mission_entry: String) -> String:
 	entry = mission_entry
+	for h in props:   # spawned things belong to the part of the mission that made them
+		if is_instance_valid(props[h]["node"]):
+			props[h]["node"].queue_free()
+	props.clear()
 	var err := game.mission_start("msn_jb_intro.sprig.xpp", entry)
 	main._log("mission " + entry + ": " + (err if err != "" else "running"))
 	return err
@@ -101,6 +109,9 @@ func start(mission_entry: String) -> String:
 func _process(delta: float) -> void:
 	if game == null or entry == "":
 		return
+	var sticks := _sticks()
+	game.mission_sticks(sticks[0], sticks[1])
+	game.mission_in_view(_looking_where_asked())
 	game.mission_update(delta, pressed)
 	for e in game.mission_events():
 		_event(e)
@@ -122,6 +133,54 @@ func _process(delta: float) -> void:
 		entry = ""
 		main._log("mission " + done + " finished")
 		mission_finished.emit(done)
+
+
+# The sticks: a controller's, or the screen as two virtual sticks (left half moves, right half looks), each
+# the drag from where the finger went down, a full stick at a fifth of the screen's height. Up is -1.
+func _input(event: InputEvent) -> void:
+	if event is InputEventScreenTouch:
+		if event.pressed:
+			touch[event.index] = [event.position, event.position]
+		else:
+			touch.erase(event.index)
+	elif event is InputEventScreenDrag and touch.has(event.index):
+		touch[event.index][1] = event.position
+
+
+func _sticks() -> Array:
+	var l := Vector2(Input.get_joy_axis(0, JOY_AXIS_LEFT_X), Input.get_joy_axis(0, JOY_AXIS_LEFT_Y))
+	var r := Vector2(Input.get_joy_axis(0, JOY_AXIS_RIGHT_X), Input.get_joy_axis(0, JOY_AXIS_RIGHT_Y))
+	var size := get_viewport().get_visible_rect().size
+	for i in touch:
+		var d: Vector2 = (touch[i][1] - touch[i][0]) / (size.y * 0.2)
+		d = d.limit_length(1.0)
+		if touch[i][0].x < size.x * 0.5:
+			l = d
+		else:
+			r = d
+	if main.autostart and entry == "RunCheckpointIntro":   # unattended check run: look where asked
+		if prompt_id.ends_with("_up"): r.y = -1.0
+		elif prompt_id.ends_with("_left"): r.x = -1.0
+		elif prompt_id.ends_with("_right"): r.x = 1.0
+	return [l, r]
+
+
+# The prompts ask the player to look up, left or right (at the helicopter, the looters): answered from how far
+# the view has turned since the prompt came up.
+var prompt_id := ""
+var prompt_yaw := 0.0
+var prompt_pitch := 0.0
+
+func _looking_where_asked() -> bool:
+	if prompt_id.ends_with("_up"):
+		return look_pitch - prompt_pitch > 0.35
+	if prompt_id.ends_with("_down"):
+		return look_pitch - prompt_pitch < -0.35
+	if prompt_id.ends_with("_left"):
+		return look_yaw - prompt_yaw > 0.6
+	if prompt_id.ends_with("_right"):
+		return look_yaw - prompt_yaw < -0.6
+	return false
 
 
 # ---- events -------------------------------------------------------------------------------------------
@@ -149,10 +208,17 @@ func _event(e: Dictionary) -> void:
 			_music(name)
 		"sound":
 			_sound(name)
+		"hero_at":
+			_hero_at(e["position"])
+		"goal":
+			main._log("place to reach: %s at %s" % [name, e["position"]])
 		"voice":
 			_voice(name)
 		"text":
 			brief.text = texts.get(name, "")
+			prompt_id = name
+			prompt_yaw = look_yaw
+			prompt_pitch = look_pitch
 		"ui_off":
 			if name == "uno_controller_prompt":
 				brief.text = ""
@@ -184,6 +250,7 @@ func _use_camera(object: String, play: bool) -> void:
 		cam_playing = false
 		cam_t = 0.0
 		_place(0.0)
+		look_base = main.cam.global_transform
 		return
 	# the clip the camera's file plays: "start" for the first camera, otherwise its first clip that is not "init"
 	cam_clip = "start" if not game.camera_clip(file, "start", 0.0).is_empty() else ""
@@ -201,7 +268,8 @@ func _use_camera(object: String, play: bool) -> void:
 
 
 func _camera(delta: float, st: Dictionary) -> void:
-	if cam_object == "":
+	if walking:
+		_walk(delta)
 		return
 	if cam_playing:
 		cam_t += delta
@@ -212,7 +280,19 @@ func _camera(delta: float, st: Dictionary) -> void:
 			cam_playing = false
 			cam_t = cam_len
 			game.mission_camera_done(cam_object)
-	_place(cam_t)
+		_place(cam_t)
+		look_base = main.cam.global_transform
+	elif entry != "RunCheckpointPrologue":
+		# the player's own view between cameras (Cole is not drawn yet): the right stick turns it
+		var r: Vector2 = _sticks()[1]
+		look_yaw -= r.x * 1.8 * delta
+		look_pitch = clamp(look_pitch - r.y * 1.4 * delta, -1.2, 1.3)
+		var b := look_base.basis
+		var level := Vector3(b.z.x, 0, b.z.z).normalized() if Vector2(b.z.x, b.z.z).length() > 0.01 else Vector3.BACK
+		var yaw0 := atan2(level.x, level.z)
+		main.cam.global_transform = Transform3D(Basis.from_euler(Vector3(look_pitch, yaw0 + look_yaw, 0)), look_base.origin)
+	elif cam_object != "":
+		_place(cam_t)
 	# the script's camera shake: amplitudes in radians; the waveform is this engine's (two sines per axis)
 	var sh: Vector3 = st.get("shake", Vector3.ZERO)
 	if sh != Vector3.ZERO:
@@ -496,3 +576,54 @@ func _dialog_archive() -> String:
 
 func _sound(cue: String) -> void:
 	main._log("sound cue (not mapped yet): " + cue)
+
+
+# ---- the player ---------------------------------------------------------------------------------------
+# Cole is not drawn yet: the player walks as a first-person view at his eye height, on the ground the game's
+# geometry gives (collision made from the drawn meshes around him), with the left stick; the right stick looks.
+
+var walking := false
+var player_pos := Vector3.ZERO
+var collision_built := false
+const EYE := 1.7
+const SPEED := 4.5   # metres per second (a guess until Cole's own movement is read)
+
+
+func _hero_at(p: Vector3) -> void:
+	player_pos = p
+	walking = true
+	if not collision_built:
+		collision_built = true
+		var area := AABB(p - Vector3(120, 60, 120), Vector3(240, 120, 240))
+		for mi in main.city_node.get_children():
+			if mi is MeshInstance3D and mi.get_aabb().intersects(area):
+				mi.create_trimesh_collision()
+	look_yaw = main.cam.global_rotation.y
+	look_pitch = 0.0
+	main._log("player at %s" % p)
+
+
+func _walk(delta: float) -> void:
+	var sticks := _sticks()
+	var l: Vector2 = sticks[0]
+	var r: Vector2 = sticks[1]
+	look_yaw -= r.x * 1.8 * delta
+	look_pitch = clamp(look_pitch - r.y * 1.4 * delta, -1.2, 1.3)
+	var space := main.get_world_3d().direct_space_state
+	if l.length() > 0.15:
+		var fwd := Vector3(-sin(look_yaw), 0, -cos(look_yaw))
+		var right := Vector3(cos(look_yaw), 0, -sin(look_yaw))
+		var move := (fwd * -l.y + right * l.x) * SPEED * delta
+		# blocked by walls at waist height
+		var waist := player_pos + Vector3(0, 0.9, 0)
+		var hit := space.intersect_ray(PhysicsRayQueryParameters3D.create(waist, waist + move.normalized() * (move.length() + 0.3)))
+		if hit.is_empty():
+			player_pos += move
+	# stand on the ground (step up to 0.6 m, fall otherwise)
+	var down := space.intersect_ray(PhysicsRayQueryParameters3D.create(player_pos + Vector3(0, 0.6, 0), player_pos + Vector3(0, -20, 0)))
+	if not down.is_empty():
+		var gy: float = down["position"].y
+		player_pos.y = gy if player_pos.y - gy < 0.6 else max(gy, player_pos.y - 9.8 * delta)
+	main.cam.fov = 60.0
+	main.cam.global_transform = Transform3D(Basis.from_euler(Vector3(look_pitch, look_yaw, 0)), player_pos + Vector3(0, EYE, 0))
+	game.mission_player(player_pos)

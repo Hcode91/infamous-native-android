@@ -335,6 +335,27 @@ PackedStringArray InaGame::mission_unhandled() {
     return out;
 }
 
+void InaGame::mission_sticks(Vector2 left, Vector2 right) {
+    if (!d_->mission) return;
+    d_->mission->stick[0] = left.x;
+    d_->mission->stick[1] = left.y;
+    d_->mission->stick[2] = right.x;
+    d_->mission->stick[3] = right.y;
+}
+
+void InaGame::mission_player(Vector3 godot_position) {
+    if (!d_->mission) return;
+    // Godot (x, y, z) metres -> game (x, -z, y) cm
+    d_->mission->player[0] = godot_position.x * 100.0f;
+    d_->mission->player[1] = -godot_position.z * 100.0f;
+    d_->mission->player[2] = godot_position.y * 100.0f;
+    d_->mission->playerKnown = true;
+}
+
+void InaGame::mission_in_view(bool in_view) {
+    if (d_->mission) d_->mission->inView = in_view;
+}
+
 void InaGame::mission_voice_done() {
     if (d_->mission) d_->mission->voiceDone_ = true;
 }
@@ -526,6 +547,9 @@ void InaGame::_bind_methods() {
     ClassDB::bind_method(D_METHOD("mission_unhandled"), &InaGame::mission_unhandled);
     ClassDB::bind_method(D_METHOD("mission_label", "name"), &InaGame::mission_label);
     ClassDB::bind_method(D_METHOD("mission_voice_done"), &InaGame::mission_voice_done);
+    ClassDB::bind_method(D_METHOD("mission_sticks", "left", "right"), &InaGame::mission_sticks);
+    ClassDB::bind_method(D_METHOD("mission_in_view", "in_view"), &InaGame::mission_in_view);
+    ClassDB::bind_method(D_METHOD("mission_player", "position"), &InaGame::mission_player);
     ClassDB::bind_method(D_METHOD("mission_camera_done", "camera"), &InaGame::mission_camera_done);
     ClassDB::bind_method(D_METHOD("mission_props"), &InaGame::mission_props);
     ClassDB::bind_method(D_METHOD("mission_model", "model", "wrecked"), &InaGame::mission_model);
