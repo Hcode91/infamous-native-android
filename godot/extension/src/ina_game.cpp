@@ -145,7 +145,7 @@ InaGame::InaGame() : d_(std::make_unique<Impl>()) {}
 InaGame::~InaGame() = default;
 
 void InaGame::_bind_methods() {
-    ClassDB::bind_method(D_METHOD("open", "folder"), &InaGame::open);
+    ClassDB::bind_method(D_METHOD("open", "folder", "manifest"), &InaGame::open, DEFVAL(String()));
     ClassDB::bind_method(D_METHOD("build_city", "x", "y", "near_radius", "radius", "far_city"), &InaGame::build_city);
     ClassDB::bind_method(D_METHOD("time_of_day", "name"), &InaGame::time_of_day);
     ClassDB::bind_method(D_METHOD("intro_camera", "clip", "t"), &InaGame::intro_camera);
@@ -161,7 +161,7 @@ std::vector<uint8_t> InaGame::readPack(const std::string& name) {
     return {};
 }
 
-String InaGame::open(const String& folder) {
+String InaGame::open(const String& folder, const String& manifest) {
     const std::string dir = folder.utf8().get_data();
     try {
         d_->arcs[0] = std::make_unique<ina::Psarc>(dir + "/infamous1.psarc_s");
@@ -169,8 +169,8 @@ String InaGame::open(const String& folder) {
     } catch (const std::exception& e) {
         return String("cannot open the game archives in ") + folder + ": " + e.what();
     }
-    d_->names = loadNames(dir + "/oid_manifest.txt");
-    if (d_->names.size() < 1000) return String("oid_manifest.txt missing or empty in ") + folder;
+    d_->names = loadNames(manifest.is_empty() ? dir + "/oid_manifest.txt" : std::string(manifest.utf8().get_data()));
+    if (d_->names.size() < 1000) return String("oid_manifest.txt missing or empty: ") + (manifest.is_empty() ? folder : manifest);
     try {
         d_->coreBytes = readPack("core.xpp");
         d_->cityBytes = readPack("EMPIRE.xpp");

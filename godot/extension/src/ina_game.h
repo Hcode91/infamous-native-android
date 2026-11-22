@@ -27,8 +27,9 @@ public:
     InaGame();
     ~InaGame();
 
-    // Folder holding infamous1.psarc_s, infamous2.psarc_s and oid_manifest.txt. Returns "" or an error.
-    godot::String open(const godot::String& folder);
+    // Folder holding infamous1.psarc_s and infamous2.psarc_s (the game's USRDIR), and the path of
+    // oid_manifest.txt (empty: in the same folder). Returns "" or an error.
+    godot::String open(const godot::String& folder, const godot::String& manifest = godot::String());
     // The city around (x, y) in game coordinates: full detail for sectors whose centres are within near_radius,
     // low detail out to radius, the far city's stand-ins beyond.
     godot::Node3D* build_city(double x, double y, double near_radius, double radius, bool far_city);

@@ -15,6 +15,7 @@ var ui: CanvasLayer
 var status: Label
 var prompt: Label
 var folder_edit: LineEdit
+var manifest_edit: LineEdit
 var playing := false
 var play_t := 0.0
 var duration := 0.0
@@ -22,6 +23,7 @@ var shot_path := ""
 var shot_time := 0.0
 var shot_clip := "init"   # the title rests on the clip "init"; Start plays "start"
 var frames_after_load := -1
+var near_radius := 14000.0 if OS.get_name() != "Android" else 9000.0   # full detail for sectors this close
 var fov_as_vertical := true   # the rig's angle read as the vertical field of view (matches the reference framing)
 
 
@@ -35,39 +37,53 @@ func _ready() -> void:
 	shot_path = args.get("shot", "")
 	shot_time = float(args.get("time", "0"))
 	shot_clip = args.get("clip", "init")
-	var folder: String = args.get("folder", "")
-	if folder == "":
-		folder = _saved_folder()
-	if folder == "":
-		folder = _find_folder()
+	if args.has("folder"):
+		var f: String = args["folder"]
+		_load.call_deferred(f, args.get("manifest", f + "/oid_manifest.txt"))
+		return
 	if OS.get_name() == "Android":
+		get_tree().on_request_permissions_result.connect(func(_p, _g): _locate())
 		OS.request_permissions()
-	folder_edit.text = folder
-	if folder != "":
-		_load.call_deferred(folder)
-	else:
-		status.text = "Put infamous1.psarc_s, infamous2.psarc_s and oid_manifest.txt in one folder,\ntype its path below and press Load."
+	_locate.call_deferred()
 
 
-func _saved_folder() -> String:
+# Finds the game's USRDIR (holding infamous1.psarc_s) and oid_manifest.txt: the saved places first, then
+# the usual folders of a phone, a few levels deep.
+func _locate() -> void:
+	if game != null:
+		return
 	var c := ConfigFile.new()
+	var folder := ""
+	var manifest := ""
 	if c.load(SETTINGS) == OK:
-		return c.get_value("files", "folder", "")
-	return ""
+		folder = c.get_value("files", "folder", "")
+		manifest = c.get_value("files", "manifest", "")
+	if folder == "" or not FileAccess.file_exists(folder + "/infamous1.psarc_s"):
+		folder = ""
+		for r in ["/storage/emulated/0/Download", "/storage/emulated/0/Documents", "/storage/emulated/0"]:
+			folder = _search(r, "infamous1.psarc_s", 6)
+			if folder != "":
+				break
+	if manifest == "" or not FileAccess.file_exists(manifest):
+		manifest = ""
+		var places := [folder, folder.get_base_dir(), "/storage/emulated/0/Download", "/storage/emulated/0/Documents", "/storage/emulated/0"]
+		for r in places:
+			if r == "":
+				continue
+			var d := _search(r, "oid_manifest.txt", 3 if r != folder else 0)
+			if d != "":
+				manifest = d + "/oid_manifest.txt"
+				break
+	folder_edit.text = folder
+	manifest_edit.text = manifest
+	if folder != "" and manifest != "":
+		_load(folder, manifest)
+	else:
+		status.text = "Game files not found. On Android allow 'All files access' for this app,\nthen tap Load. Or type the folders below (the game's USRDIR and the manifest file)."
 
 
-func _find_folder() -> String:
-	# the usual places on a phone, a few folders deep
-	var roots := ["/storage/emulated/0/Download", "/storage/emulated/0/Documents", "/storage/emulated/0"]
-	for r in roots:
-		var f := _search(r, 3)
-		if f != "":
-			return f
-	return ""
-
-
-func _search(dir: String, depth: int) -> String:
-	if FileAccess.file_exists(dir + "/infamous1.psarc_s") and FileAccess.file_exists(dir + "/oid_manifest.txt"):
+func _search(dir: String, file: String, depth: int) -> String:
+	if FileAccess.file_exists(dir + "/" + file):
 		return dir
 	if depth <= 0:
 		return ""
@@ -75,9 +91,9 @@ func _search(dir: String, depth: int) -> String:
 	if d == null:
 		return ""
 	for sub in d.get_directories():
-		if sub.begins_with("."):
+		if sub.begins_with(".") or sub == "Android":
 			continue
-		var f := _search(dir + "/" + sub, depth - 1)
+		var f := _search(dir + "/" + sub, file, depth - 1)
 		if f != "":
 			return f
 	return ""
@@ -120,25 +136,35 @@ func _make_ui() -> void:
 	folder_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	folder_edit.placeholder_text = "Folder with the game files"
 	row.add_child(folder_edit)
+	manifest_edit = LineEdit.new()
+	manifest_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	manifest_edit.placeholder_text = "oid_manifest.txt"
+	row.add_child(manifest_edit)
 	var b := Button.new()
 	b.text = "Load"
-	b.pressed.connect(func(): _load(folder_edit.text.strip_edges()))
+	b.pressed.connect(func():
+		if folder_edit.text.strip_edges() == "":
+			_locate()
+		else:
+			_load(folder_edit.text.strip_edges(), manifest_edit.text.strip_edges()))
 	row.add_child(b)
 	row.name = "FolderRow"
 	ui.add_child(row)
 
 
-func _load(folder: String) -> void:
+func _load(folder: String, manifest: String) -> void:
 	status.text = "Reading the game files..."
 	await get_tree().process_frame
 	await get_tree().process_frame
-	game = InaGame.new()
-	var err := game.open(folder)
+	var g := InaGame.new()
+	var err := g.open(folder, manifest)
 	if err != "":
 		status.text = err
 		return
+	game = g
 	var c := ConfigFile.new()
 	c.set_value("files", "folder", folder)
+	c.set_value("files", "manifest", manifest)
 	c.save(SETTINGS)
 	ui.get_node("FolderRow").visible = false
 
@@ -149,9 +175,9 @@ func _load(folder: String) -> void:
 	duration = shot["duration"]
 	var anchor: Vector3 = shot["eye_game"]
 
-	status.text = "Building the city..."
+	status.text = "Building the city (this takes a while the first time)..."
 	await get_tree().process_frame
-	var city := game.build_city(anchor.x, anchor.y, 14000.0, 26000.0, true)
+	var city := game.build_city(anchor.x, anchor.y, near_radius, 26000.0, true)
 	add_child(city)
 	print(game.last_log())
 
