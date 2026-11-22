@@ -25,6 +25,7 @@ var opening_shots: Array = []   # opening times (s) to save frames at, for check
 var opening_t := -1.0
 var folder_edit: LineEdit
 var manifest_edit: LineEdit
+var access_button: Button
 var playing := false
 var play_t := 0.0
 var duration := 0.0
@@ -55,17 +56,73 @@ func _ready() -> void:
 		var f: String = args["folder"]
 		_load.call_deferred(f, args.get("manifest", f + "/oid_manifest.txt"))
 		return
+	_log("start: %s, %s, renderer %s" % [OS.get_name(), OS.get_model_name(), RenderingServer.get_current_rendering_method()])
+	_log("plugin: " + ("loaded" if ClassDB.class_exists("InaGame") else "NOT LOADED"))
 	if OS.get_name() == "Android":
-		get_tree().on_request_permissions_result.connect(func(_p, _g): _locate())
 		OS.request_permissions()
-	_locate.call_deferred()
+		_log("permissions asked; granted: " + str(OS.get_granted_permissions()))
+	_wait_for_storage()
+
+
+# All-files access is granted on a settings page outside the app, so keep checking until the shared
+# storage can be read, then look for the files; look again every few seconds until both are found.
+func _wait_for_storage() -> void:
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var said_waiting := false
+	while game == null:
+		var readable := DirAccess.open("/storage/emulated/0/Download") != null or OS.get_name() != "Android"
+		if not readable:
+			if not said_waiting:
+				_log("shared storage not readable: allow 'All files access'")
+				said_waiting = true
+			status.text = "This app needs 'All files access' to read your game files.\nTap 'Allow access', turn it on, then come back."
+			access_button.visible = true
+			await get_tree().create_timer(1.0).timeout
+			continue
+		access_button.visible = false
+		status.text = "Looking for the game files..."
+		await get_tree().process_frame
+		await get_tree().process_frame
+		if await _locate():
+			return
+		await get_tree().create_timer(5.0).timeout
+
+
+# A start-up log: on screen until the title shows, and in Download/INA-Godot-log.txt so it can be sent.
+var log_lines: Array[String] = []
+var log_label: Label
+var log_t0 := Time.get_ticks_msec()
+
+func _log(msg: String) -> void:
+	var line := "%6.1fs  %s" % [(Time.get_ticks_msec() - log_t0) / 1000.0, msg]
+	print(line)
+	log_lines.append(line)
+	if log_label == null:
+		var layer := CanvasLayer.new()
+		layer.layer = 100
+		add_child(layer)
+		log_label = Label.new()
+		log_label.position = Vector2(8, 8)
+		log_label.add_theme_font_size_override("font_size", 14)
+		log_label.add_theme_constant_override("outline_size", 4)
+		log_label.add_theme_color_override("font_outline_color", Color.BLACK)
+		log_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		layer.add_child(log_label)
+	log_label.text = "\n".join(log_lines.slice(max(0, log_lines.size() - 14)))
+	for path in ["/storage/emulated/0/Download/INA-Godot-log.txt", "user://INA-Godot-log.txt"]:
+		var f := FileAccess.open(path, FileAccess.WRITE)
+		if f != null:
+			f.store_string("\n".join(log_lines) + "\n")
+			f.close()
+			break
 
 
 # Finds the game's USRDIR (holding infamous1.psarc_s) and oid_manifest.txt: the saved places first, then
 # the usual folders of a phone, a few levels deep.
-func _locate() -> void:
+func _locate() -> bool:
 	if game != null:
-		return
+		return true
 	var c := ConfigFile.new()
 	var folder := ""
 	var manifest := ""
@@ -75,7 +132,7 @@ func _locate() -> void:
 	if folder == "" or not FileAccess.file_exists(folder + "/infamous1.psarc_s"):
 		folder = ""
 		for r in ["/storage/emulated/0/Download", "/storage/emulated/0/Documents", "/storage/emulated/0"]:
-			folder = _search(r, "infamous1.psarc_s", 6)
+			folder = _search(r, "infamous1.psarc_s", 7)
 			if folder != "":
 				break
 	if manifest == "" or not FileAccess.file_exists(manifest):
@@ -84,16 +141,20 @@ func _locate() -> void:
 		for r in places:
 			if r == "":
 				continue
-			var d := _search(r, "oid_manifest.txt", 3 if r != folder else 0)
+			var d := _search(r, "oid_manifest.txt", 6 if r != folder else 0)
 			if d != "":
 				manifest = d + "/oid_manifest.txt"
 				break
 	folder_edit.text = folder
 	manifest_edit.text = manifest
+	_log("game folder: " + (folder if folder != "" else "not found"))
+	_log("manifest: " + (manifest if manifest != "" else "not found"))
 	if folder != "" and manifest != "":
 		_load(folder, manifest)
-	else:
-		status.text = "Game files not found. On Android allow 'All files access' for this app,\nthen tap Load. Or type the folders below (the game's USRDIR and the manifest file)."
+		return true
+	status.text = "Game folder (with infamous1.psarc_s): %s\noid_manifest.txt: %s\nLooking again every few seconds." % [
+		folder if folder != "" else "NOT FOUND", manifest if manifest != "" else "NOT FOUND"]
+	return false
 
 
 func _search(dir: String, file: String, depth: int) -> String:
@@ -187,6 +248,11 @@ func _make_ui() -> void:
 		else:
 			_load(folder_edit.text.strip_edges(), manifest_edit.text.strip_edges()))
 	row.add_child(b)
+	access_button = Button.new()
+	access_button.text = "Allow access"
+	access_button.visible = false
+	access_button.pressed.connect(func(): OS.request_permission("android.permission.MANAGE_EXTERNAL_STORAGE"))
+	row.add_child(access_button)
 	row.name = "FolderRow"
 	ui.add_child(row)
 
@@ -195,11 +261,14 @@ func _load(folder: String, manifest: String) -> void:
 	status.text = "Reading the game files..."
 	await get_tree().process_frame
 	await get_tree().process_frame
+	_log("reading the archives...")
 	var g := InaGame.new()
 	var err := g.open(folder, manifest)
 	if err != "":
 		status.text = err
+		_log("open failed: " + err)
 		return
+	_log("archives read")
 	game = g
 	game_folder = folder
 	var c := ConfigFile.new()
@@ -214,8 +283,8 @@ func _load(folder: String, manifest: String) -> void:
 		splash = BinkPlayer.new()
 		add_child(splash)
 		var merr := splash.play(folder + "/movies/cutscene/splash_europe.bik")
+		_log("splash: " + (merr if merr != "" else "playing"))
 		if merr != "":
-			print(merr)
 			splash.queue_free()
 			splash = null
 
@@ -227,6 +296,7 @@ func _load(folder: String, manifest: String) -> void:
 	var anchor: Vector3 = shot["eye_game"]
 
 	status.text = "Building the city (this takes a while the first time)..."
+	_log("building the city...")
 	await get_tree().process_frame
 	# built on a worker thread so the boot movie keeps playing
 	var out := []   # a lambda can't assign to a captured local, so the result goes in an array
@@ -236,6 +306,7 @@ func _load(folder: String, manifest: String) -> void:
 	WorkerThreadPool.wait_for_task_completion(task)
 	city_node = out[0]
 	add_child(city_node)
+	_log("city built: %d pieces; %s" % [city_node.get_child_count(), game.last_log().replace("\n", " | ").left(200)])
 	if splash != null and is_instance_valid(splash) and not splash.done:
 		status.text = ""
 		await splash.finished
@@ -251,6 +322,11 @@ func _load(folder: String, manifest: String) -> void:
 	cam.make_current()
 	_place_camera(shot_clip, shot_time)
 	status.text = ""
+	_log("title showing")
+	if log_label != null:
+		var tw := create_tween()
+		tw.tween_interval(4.0)
+		tw.tween_property(log_label, "modulate:a", 0.0, 1.0)
 	var lt := game.texture("infamous_logo.psd", "msn_jb_intro.sprig.xpp")
 	if lt != null:
 		logo.texture = lt
