@@ -39,6 +39,11 @@ class FillStack {
 public:
     void define(const std::string& name, const FillSettings& s) { settings_[name] = s; }
     bool known(const std::string& name) const { return settings_.count(name) != 0; }
+    bool isOn(const std::string& name) const { return active_.count(name) != 0; }
+    float level(const std::string& name) const {   // 0..1: how far it has faded in
+        const auto it = active_.find(name);
+        return it == active_.end() ? 0.0f : it->second.level;
+    }
     void trigger(const std::string& name);                 // fade in, then hold or run through its peak
     void untrigger(const std::string& name);               // fade out over its own time
     void stop(const std::string& name, float seconds);     // fade out over the given time

@@ -19,7 +19,7 @@ add_library(ina_engine STATIC
     ${ENGINE}/assets/character_mesh.cpp ${ENGINE}/anim/clip.cpp ${ENGINE}/anim/anim_set.cpp
     ${ENGINE}/anim/character_loader.cpp ${ENGINE}/anim/leg_ik.cpp ${ENGINE}/anim/character_model.cpp
     ${ENGINE}/script/script_vm.cpp ${ENGINE}/script/script_host.cpp ${ENGINE}/script/property_set.cpp
-    ${ENGINE}/world/scene.cpp ${ENGINE}/world/spawn.cpp ${ENGINE}/world/time_of_day.cpp
+    ${ENGINE}/world/scene.cpp ${ENGINE}/world/spawn.cpp ${ENGINE}/world/scripted_mission.cpp ${ENGINE}/world/time_of_day.cpp
     ${ENGINE}/world/sector_lights.cpp ${ENGINE}/world/city_stream.cpp ${ENGINE}/core/png.cpp)
 target_include_directories(ina_engine PUBLIC ${ENGINE})
 find_package(ZLIB REQUIRED)

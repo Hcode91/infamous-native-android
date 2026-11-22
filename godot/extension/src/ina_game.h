@@ -8,6 +8,9 @@
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/string.hpp>
 
+#include "world/city_stream.h"
+#include "world/scripted_mission.h"
+
 #include <map>
 #include <memory>
 #include <string>
@@ -57,7 +60,39 @@ public:
 protected:
     static void _bind_methods();
 
+    // The game's own script for a mission pack (e.g. "msn_jb_intro.sprig.xpp"), from its entry function
+    // (e.g. "RunCheckpointPrologue"). Returns "" or an error.
+    godot::String mission_start(const godot::String& pack, const godot::String& entry);
+    void mission_update(double dt, bool button_pressed);
+    // cover (Color, the fills' overlay), prompt (bool), shake (Vector3: pan, tilt, roll), tods (Array of
+    // {name, lerp}), fills (names switched on), finished (bool)
+    godot::Dictionary mission_state();
+    godot::Array mission_events();                // {kind, name, detail, position (Godot space) or null, value}
+    godot::PackedStringArray mission_unhandled(); // requests nothing handled, as text
+    void mission_label(const godot::String& name);
+    void mission_voice_done();                    // the voice line the script started has finished
+    void mission_camera_done(const godot::String& camera);
+    godot::Array mission_props();                 // {handle, model, wrecked, position, rotation (Quaternion)}
+    godot::Node3D* mission_model(const godot::String& model, bool wrecked);
+    godot::Dictionary fill_settings(const godot::String& name);
+    // Where a named object of the mission pack is (Godot space); null when unknown.
+    godot::Variant mission_object(const godot::String& name);
+    // A named object's property set as {"Class.NAME": value}: floats, bools, Vector4 for vectors, String for names.
+    godot::Dictionary mission_properties(const godot::String& name);
+    // Script objects the scripts show, move and scale: {name, file, shown, position (offset, Godot metres),
+    // scale (Vector3, Godot axes), euler (Vector3, radians, game axes), anim}
+    godot::Array mission_objects();
+    // A proxy file's geometry as a node (placed as in its file), with meta "pivot": the centre of its bounds.
+    godot::Node3D* mission_file_node(const godot::String& file);
+    // A shockwave's settings by handle number: scale_fn, alpha_fn, distort_fn, refract_fn (Vector4), colors
+    // (Array of Color), time, parent
+    godot::Dictionary mission_shockwave(int64_t handle);
+    godot::Dictionary camera_clip(const godot::String& file, const godot::String& clip, double t);
+    godot::String mission_file_for(const godot::String& object);
+    godot::Dictionary mission_camera_parent(const godot::String& camera);   // {position, rotation} of what it rides on
+
 private:
+    void addChunk(godot::Node3D* root, const ina::Chunk& ch, size_t& meshes, size_t& tris, std::string& log);
     std::vector<uint8_t> readPack(const std::string& name);
     struct Impl;
     std::unique_ptr<Impl> d_;

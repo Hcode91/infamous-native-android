@@ -29,6 +29,7 @@
 #include "anim/character_loader.h"
 #include "anim/clip.h"
 #include "assets/character_mesh.h"
+#include "world/spawn.h"
 #include "assets/hex_map.h"
 #include "assets/pack.h"
 #include "assets/psarc.h"
@@ -133,7 +134,18 @@ double msSince(std::chrono::steady_clock::time_point t) {
 
 }  // namespace
 
+namespace {
+Ref<ImageTexture> makeTexture(const ina::TextureImage& img);
+}
+
 struct InaGame::Impl {
+    std::vector<uint8_t> missionBytes;
+    std::unique_ptr<ina::Pack> missionPack;
+    std::unique_ptr<ina::ScriptedMission> mission;
+    decltype(ina::textureIndex(std::declval<const ina::Pack&>())) missionTex;
+    bool missionTexReady = false;
+    double missionNow = 0;
+    std::map<std::pair<std::string, bool>, bool> modelTexturesDone;
     std::unique_ptr<ina::Psarc> arcs[2];
     std::vector<std::string> names;
     std::vector<uint8_t> coreBytes, cityBytes;
@@ -147,6 +159,7 @@ struct InaGame::Impl {
     // the opening's camera
     std::string introClipName;
     bool introRead = false, introOk = false;
+    std::vector<ina::ClipObject::Event> introEvents;
     ina::Skeleton introSkeleton;
     ina::AnimClip introClip;
     float introAnchor[3] = {0, 0, 0};
@@ -250,7 +263,281 @@ PackedByteArray InaGame::archive_file(const String& archive, const String& name)
     return out;
 }
 
+String InaGame::mission_start(const String& pack, const String& entry) {
+    d_->mission.reset();
+    d_->missionPack.reset();
+    d_->missionBytes = readPack(pack.utf8().get_data());
+    if (d_->missionBytes.empty()) return "no pack " + pack;
+    try {
+        d_->missionPack = std::make_unique<ina::Pack>(d_->missionBytes);
+        d_->missionTexReady = false;
+        d_->mission = std::make_unique<ina::ScriptedMission>(*d_->missionPack, d_->core.get(), d_->names);
+        if (!d_->mission->ok()) return "no script in " + pack;
+        if (!d_->mission->start(entry.utf8().get_data())) return "no function " + entry + " in " + pack;
+    } catch (const std::exception& e) {
+        d_->mission.reset();
+        return String("mission: ") + e.what();
+    }
+    d_->missionNow = 0;
+    return "";
+}
+
+void InaGame::mission_update(double dt, bool button_pressed) {
+    if (!d_->mission) return;
+    d_->missionNow += dt;
+    d_->mission->buttonPressed = button_pressed;
+    d_->mission->update(d_->missionNow, float(dt));
+}
+
+Dictionary InaGame::mission_state() {
+    Dictionary r;
+    if (!d_->mission) return r;
+    ina::ScriptedMission& m = *d_->mission;
+    float c[4];
+    m.fills.composite(c);
+    r["cover"] = Color(c[0], c[1], c[2], c[3]);
+    r["prompt"] = m.prompt;
+    r["shake"] = Vector3(m.shake[0], m.shake[1], m.shake[2]);
+    Array tods;
+    for (const auto& [h, t] : m.tods) {
+        Dictionary d;
+        d["name"] = String(t.name.c_str());
+        d["lerp"] = t.lerp;
+        tods.push_back(d);
+    }
+    r["tods"] = tods;
+    Dictionary fills;   // name -> how far it has faded in (0..1)
+    for (const std::string& f : m.activeFills()) fills[String(f.c_str())] = m.fills.level(f);
+    r["fills"] = fills;
+    r["finished"] = m.finished();
+    return r;
+}
+
+Array InaGame::mission_events() {
+    Array out;
+    if (!d_->mission) return out;
+    for (const ina::ScriptedMission::Event& e : d_->mission->takeEvents()) {
+        Dictionary d;
+        d["kind"] = String(e.kind.c_str());
+        d["name"] = String(e.name.c_str());
+        d["detail"] = String(e.detail.c_str());
+        d["position"] = e.hasPos ? Variant(toGodot(e.pos)) : Variant();
+        d["value"] = e.value;
+        out.push_back(d);
+    }
+    return out;
+}
+
+PackedStringArray InaGame::mission_unhandled() {
+    PackedStringArray out;
+    if (!d_->mission) return out;
+    for (const std::string& u : d_->mission->takeUnhandled()) out.push_back(String(u.c_str()));
+    return out;
+}
+
+void InaGame::mission_voice_done() {
+    if (d_->mission) d_->mission->voiceDone_ = true;
+}
+
+void InaGame::mission_label(const String& name) {
+    if (d_->mission) d_->mission->label(name.utf8().get_data());
+}
+
+void InaGame::mission_camera_done(const String& camera) {
+    if (d_->mission) d_->mission->cameraFinished(camera.utf8().get_data());
+}
+
+// The game's axes (z up) to Godot's (y up): (x, y, z) -> (x, z, -y), for rotations too.
+static Quaternion quatToGodot(const float q[4]) {
+    return Quaternion(q[0], q[2], -q[1], q[3]).normalized();
+}
+
+Array InaGame::mission_props() {
+    Array out;
+    if (!d_->mission) return out;
+    for (const auto& [h, p] : d_->mission->props) {
+        Dictionary d;
+        d["handle"] = int64_t(h);
+        d["model"] = String(p.model.c_str());
+        d["wrecked"] = p.wrecked;
+        d["position"] = toGodot(p.at.pos);
+        d["rotation"] = quatToGodot(p.at.q);
+        out.push_back(d);
+    }
+    return out;
+}
+
+Node3D* InaGame::mission_model(const String& model, bool wrecked) {
+    Node3D* root = memnew(Node3D);
+    if (!d_->mission) return root;
+    const auto it = d_->mission->models.find(model.utf8().get_data());
+    if (it == d_->mission->models.end()) return root;
+    ina::Chunk ch;
+    ch.scene = wrecked ? it->second.wreck : it->second.intact;
+    std::vector<ina::Chunk> chunks{ch};
+    if (!d_->missionTexReady) {
+        d_->missionTex = ina::textureIndex(*d_->missionPack);
+        d_->missionTexReady = true;
+    }
+    auto tex = ina::decodeChunkTextures(chunks, {{d_->missionPack.get(), &d_->missionTex}, {d_->core.get(), &d_->coreTex}}, 512,
+                                        [&](uint64_t k) { return d_->textures.count(k) != 0; });
+    for (auto& [k, img] : tex) d_->textures[k] = makeTexture(img);
+    size_t meshes = 0, tris = 0;
+    std::string log;
+    addChunk(root, chunks[0], meshes, tris, log);
+    return root;
+}
+
+Dictionary InaGame::fill_settings(const String& name) {
+    Dictionary r;
+    if (!d_->mission) return r;
+    const auto it = d_->mission->fillDefs.find(name.utf8().get_data());
+    if (it == d_->mission->fillDefs.end()) return r;
+    const ina::FillSettings& f = it->second;
+    r["fade_in"] = f.fadeIn;
+    r["peak"] = f.peak;
+    r["fade_out"] = f.fadeOut;
+    r["hold"] = f.hold;
+    r["overlay"] = Color(f.overlayColor[0], f.overlayColor[1], f.overlayColor[2], f.overlayOpacity);
+    r["bloom"] = f.bloom;
+    r["bloom_color"] = Color(f.bloomColor[0], f.bloomColor[1], f.bloomColor[2]);
+    return r;
+}
+
+Dictionary InaGame::mission_properties(const String& name) {
+    Dictionary r;
+    if (!d_->mission) return r;
+    for (const ina::ScriptProperty& p : d_->mission->objectProperties(name.utf8().get_data())) {
+        Variant v;
+        switch (p.type) {
+            case 0x1: v = p.flag; break;
+            case 0x3: v = p.v[0]; break;
+            case 0x5: case 0xa: v = Vector4(p.v[0], p.v[1], p.v[2], p.v[3]); break;
+            case 0x7: v = p.raw < d_->names.size() ? String(d_->names[p.raw].c_str()) : String(); break;
+            default: v = int64_t(p.raw); break;
+        }
+        r[String(d_->mission->propertyName(p).c_str())] = v;
+    }
+    return r;
+}
+
+Array InaGame::mission_objects() {
+    // parts moved through their own handles ("name#handle") are merged into their object: the largest one wins
+    Array out;
+    if (!d_->mission) return out;
+    std::map<std::string, const ina::ScriptedMission::ObjState*> best;
+    std::map<std::string, bool> shown, tagged;
+    auto size = [](const ina::ScriptedMission::ObjState* s) { return std::fabs(s->scale[0]) + std::fabs(s->scale[1]) + std::fabs(s->scale[2]); };
+    for (const auto& [n, o] : d_->mission->objects) {
+        const std::string base = n.substr(0, n.find('#'));
+        shown[base] = shown[base] || o.shown;
+        const bool part = n.find('#') != std::string::npos;
+        const auto it = best.find(base);
+        if (it == best.end() || (part && !tagged[base]) || (part == tagged[base] && size(&o) > size(it->second))) {
+            best[base] = &o;
+            tagged[base] = tagged[base] || part;
+        }
+    }
+    for (const auto& [n, o] : best) {
+        Dictionary d;
+        d["name"] = String(n.c_str());
+        d["file"] = String(o->file.c_str());
+        d["shown"] = shown[n];
+        d["position"] = toGodot(o->pos);
+        d["scale"] = Vector3(o->scale[0], o->scale[2], o->scale[1]);
+        d["euler"] = Vector3(o->euler[0], o->euler[1], o->euler[2]);
+        d["anim"] = String(o->anim.c_str());
+        out.push_back(d);
+    }
+    return out;
+}
+
+Node3D* InaGame::mission_file_node(const String& file) {
+    Node3D* root = memnew(Node3D);
+    if (!d_->mission) return root;
+    const ina::Scene* sc = d_->mission->fileScene(file.utf8().get_data());
+    if (!sc) return root;
+    ina::Chunk ch;
+    ch.scene = *sc;
+    std::vector<ina::Chunk> chunks{ch};
+    if (!d_->missionTexReady) {
+        d_->missionTex = ina::textureIndex(*d_->missionPack);
+        d_->missionTexReady = true;
+    }
+    auto tex = ina::decodeChunkTextures(chunks, {{d_->missionPack.get(), &d_->missionTex}, {d_->core.get(), &d_->coreTex}}, 512,
+                                        [&](uint64_t k) { return d_->textures.count(k) != 0; });
+    for (auto& [k, img] : tex) d_->textures[k] = makeTexture(img);
+    size_t meshes = 0, tris = 0;
+    std::string log;
+    addChunk(root, chunks[0], meshes, tris, log);
+    const float c[3] = {0.5f * (sc->boxMin[0] + sc->boxMax[0]), 0.5f * (sc->boxMin[1] + sc->boxMax[1]), 0.5f * (sc->boxMin[2] + sc->boxMax[2])};
+    root->set_meta("pivot", toGodot(c));
+    return root;
+}
+
+Dictionary InaGame::mission_shockwave(int64_t handle) {
+    Dictionary r;
+    if (!d_->mission) return r;
+    for (const auto& [h, w] : d_->mission->shockwaves) {
+        if (int64_t(h & 0xFFFFF) != handle) continue;
+        r["scale_fn"] = Vector4(w.scaleFn[0], w.scaleFn[1], w.scaleFn[2], w.scaleFn[3]);
+        r["alpha_fn"] = Vector4(w.alphaFn[0], w.alphaFn[1], w.alphaFn[2], w.alphaFn[3]);
+        r["distort_fn"] = Vector4(w.distortFn[0], w.distortFn[1], w.distortFn[2], w.distortFn[3]);
+        r["refract_fn"] = Vector4(w.refractFn[0], w.refractFn[1], w.refractFn[2], w.refractFn[3]);
+        Array cols;
+        for (const auto& c : w.colors) cols.push_back(Color(c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f, c[3] / 255.0f));
+        r["colors"] = cols;
+        r["time"] = w.time;
+        r["scale"] = Vector3(w.scale[0], w.scale[2], w.scale[1]);
+        r["parent"] = String(w.parent.c_str());
+    }
+    return r;
+}
+
+Dictionary InaGame::mission_camera_parent(const String& camera) {
+    Dictionary r;
+    if (!d_->mission) return r;
+    const auto it = d_->mission->cameraParents.find(camera.utf8().get_data());
+    if (it == d_->mission->cameraParents.end()) return r;
+    const auto p = d_->mission->props.find(it->second);
+    if (p == d_->mission->props.end()) return r;
+    r["position"] = toGodot(p->second.at.pos);
+    r["rotation"] = quatToGodot(p->second.at.q);
+    return r;
+}
+
+String InaGame::mission_file_for(const String& object) {
+    if (!d_->mission) return String();
+    return String(d_->mission->fileFor(object.utf8().get_data()).c_str());
+}
+
+Variant InaGame::mission_object(const String& name) {
+    if (!d_->mission) return Variant();
+    const auto it = d_->mission->placed.find(name.utf8().get_data());
+    if (it == d_->mission->placed.end()) return Variant();
+    return toGodot(it->second.pos);
+}
+
 void InaGame::_bind_methods() {
+    ClassDB::bind_method(D_METHOD("mission_start", "pack", "entry"), &InaGame::mission_start);
+    ClassDB::bind_method(D_METHOD("mission_update", "dt", "button_pressed"), &InaGame::mission_update);
+    ClassDB::bind_method(D_METHOD("mission_state"), &InaGame::mission_state);
+    ClassDB::bind_method(D_METHOD("mission_events"), &InaGame::mission_events);
+    ClassDB::bind_method(D_METHOD("mission_unhandled"), &InaGame::mission_unhandled);
+    ClassDB::bind_method(D_METHOD("mission_label", "name"), &InaGame::mission_label);
+    ClassDB::bind_method(D_METHOD("mission_voice_done"), &InaGame::mission_voice_done);
+    ClassDB::bind_method(D_METHOD("mission_camera_done", "camera"), &InaGame::mission_camera_done);
+    ClassDB::bind_method(D_METHOD("mission_props"), &InaGame::mission_props);
+    ClassDB::bind_method(D_METHOD("mission_model", "model", "wrecked"), &InaGame::mission_model);
+    ClassDB::bind_method(D_METHOD("fill_settings", "name"), &InaGame::fill_settings);
+    ClassDB::bind_method(D_METHOD("mission_object", "name"), &InaGame::mission_object);
+    ClassDB::bind_method(D_METHOD("mission_properties", "name"), &InaGame::mission_properties);
+    ClassDB::bind_method(D_METHOD("mission_objects"), &InaGame::mission_objects);
+    ClassDB::bind_method(D_METHOD("camera_clip", "file", "clip", "t"), &InaGame::camera_clip);
+    ClassDB::bind_method(D_METHOD("mission_file_for", "object"), &InaGame::mission_file_for);
+    ClassDB::bind_method(D_METHOD("mission_camera_parent", "camera"), &InaGame::mission_camera_parent);
+    ClassDB::bind_method(D_METHOD("mission_file_node", "file"), &InaGame::mission_file_node);
+    ClassDB::bind_method(D_METHOD("mission_shockwave", "handle"), &InaGame::mission_shockwave);
     ClassDB::bind_method(D_METHOD("cube_faces", "name", "pack"), &InaGame::cube_faces);
     ClassDB::bind_method(D_METHOD("texture", "name", "pack"), &InaGame::texture, DEFVAL(String()));
     ClassDB::bind_method(D_METHOD("open", "folder", "manifest"), &InaGame::open, DEFVAL(String()));
@@ -329,6 +616,96 @@ Ref<ImageTexture> makeTexture(const ina::TextureImage& img) {
 
 }  // namespace
 
+// Adds one chunk's geometry under `root` as meshes (several when it has more surfaces than Godot allows).
+void InaGame::addChunk(Node3D* root, const ina::Chunk& ch, size_t& meshes, size_t& tris, std::string& log) {
+    const ina::Scene& s = ch.scene;
+    if (s.vertices.empty() || s.batches.empty()) return;
+    Ref<ArrayMesh> mesh;
+    mesh.instantiate();
+    const size_t nv = s.vertices.size() / ina::kVertexFloats;
+    for (size_t bi = 0; bi < s.batches.size(); bi++) {
+        const ina::SceneBatch& batch = s.batches[bi];
+        if (mesh->get_surface_count() >= 250) {   // Godot allows 256 surfaces per mesh
+            MeshInstance3D* part = memnew(MeshInstance3D);
+            part->set_mesh(mesh);
+            root->add_child(part);
+            meshes++;
+            mesh.instantiate();
+        }
+        if (batch.mode == ina::DrawMode::Invisible || !batch.indexCount) continue;
+        // the batch's vertices, renumbered
+        std::vector<int32_t> remap(nv, -1);
+        PackedVector3Array pos, nrm;
+        PackedVector2Array uv;
+        PackedColorArray col;
+        PackedInt32Array idx;
+        bool prelit = false;
+        for (uint32_t i = 0; i < batch.indexCount; i += 3) {
+            // Godot's front faces wind the other way after the axis swap
+            const uint32_t tri[3] = {s.indices[batch.firstIndex + i], s.indices[batch.firstIndex + i + 2],
+                                     s.indices[batch.firstIndex + i + 1]};
+            for (uint32_t src : tri) {
+                if (remap[src] < 0) {
+                    const float* v = &s.vertices[size_t(src) * ina::kVertexFloats];
+                    remap[src] = int32_t(pos.size());
+                    pos.push_back(toGodot(v));
+                    const float len = std::sqrt(v[3] * v[3] + v[4] * v[4] + v[5] * v[5]);
+                    float ambient = 1.0f;
+                    if (len > 2.5f) prelit = true;
+                    else if (len > 1.001f) ambient = std::clamp(2.0f - len, 0.0f, 1.0f);
+                    const float n[3] = {v[3], v[4], v[5]};
+                    Vector3 gn = dirToGodot(n);
+                    nrm.push_back(len > 1e-6f ? gn / len : Vector3(0, 1, 0));
+                    uv.push_back(Vector2(v[6], v[7]));
+                    col.push_back(Color(ambient, ambient, ambient, 1.0f));
+                }
+                idx.push_back(remap[src]);
+            }
+        }
+        if (pos.is_empty()) continue;
+        {
+            // self-lit and decal surfaces whose texture is missing would show as flat white sheets
+            const uint64_t k = bi < ch.textureKeys.size() ? ch.textureKeys[bi] : 0;
+            const bool decalOrLit = prelit || batch.mode == ina::DrawMode::Decal;
+            auto it = d_->textures.find(k);
+            if (decalOrLit && (!k || it == d_->textures.end() || it->second.is_null())) continue;
+        }
+        Array arrays;
+        arrays.resize(Mesh::ARRAY_MAX);
+        arrays[Mesh::ARRAY_VERTEX] = pos;
+        arrays[Mesh::ARRAY_NORMAL] = nrm;
+        arrays[Mesh::ARRAY_TEX_UV] = uv;
+        arrays[Mesh::ARRAY_COLOR] = col;
+        arrays[Mesh::ARRAY_INDEX] = idx;
+        mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+        tris += size_t(idx.size()) / 3;
+        const int kind = prelit ? 3 : batch.mode == ina::DrawMode::Cutout ? 1 : batch.mode == ina::DrawMode::Decal ? 2 : 0;
+        const uint64_t key = bi < ch.textureKeys.size() ? ch.textureKeys[bi] : 0;
+        Ref<ShaderMaterial>& mat = d_->materials[{kind, key, batch.tint}];
+        if (mat.is_null()) {
+            mat.instantiate();
+            mat->set_shader(d_->shaders[kind]);
+            auto it = d_->textures.find(key);
+            const bool has = key && it != d_->textures.end() && it->second.is_valid();
+            if (!has && getenv("INA_DEBUG_TEX"))
+                log += "no texture: kind " + std::to_string(kind) + " key " + std::to_string(key) + " tris " +
+                       std::to_string(idx.size() / 3) + " at " + std::to_string(pos[0].x) + "," + std::to_string(pos[0].y) + "," + std::to_string(pos[0].z) + "\n";
+            mat->set_shader_parameter("has_tex", has);
+            // Godot's mat3 takes columns; the game's matrix is stored by rows
+            const auto& t = batch.tint;
+            mat->set_shader_parameter("tint", Basis(Vector3(t[0], t[3], t[6]), Vector3(t[1], t[4], t[7]), Vector3(t[2], t[5], t[8])));
+            if (has) mat->set_shader_parameter("tex", it->second);
+            if (kind == 2) mat->set_render_priority(std::min<int>(batch.layer, 100));
+        }
+        mesh->surface_set_material(mesh->get_surface_count() - 1, mat);
+    }
+    if (mesh->get_surface_count() == 0) return;
+    MeshInstance3D* mi = memnew(MeshInstance3D);
+    mi->set_mesh(mesh);
+    root->add_child(mi);
+    meshes++;
+}
+
 Node3D* InaGame::build_city(double x, double y, double near_radius, double radius, bool far_city, bool after_blast) {
     Node3D* root = memnew(Node3D);
     root->set_name("City");
@@ -405,111 +782,7 @@ Node3D* InaGame::build_city(double x, double y, double near_radius, double radiu
     }
 
     for (Built& b : built) {
-        for (ina::Chunk& ch : b.chunks) {
-            const ina::Scene& s = ch.scene;
-            if (s.vertices.empty() || s.batches.empty()) continue;
-            Ref<ArrayMesh> mesh;
-            mesh.instantiate();
-            const size_t nv = s.vertices.size() / ina::kVertexFloats;
-            for (size_t bi = 0; bi < s.batches.size(); bi++) {
-                const ina::SceneBatch& batch = s.batches[bi];
-                if (mesh->get_surface_count() >= 250) {   // Godot allows 256 surfaces per mesh
-                    MeshInstance3D* part = memnew(MeshInstance3D);
-                    part->set_mesh(mesh);
-                    root->add_child(part);
-                    meshes++;
-                    mesh.instantiate();
-                }
-                if (batch.mode == ina::DrawMode::Invisible || !batch.indexCount) continue;
-                // the batch's vertices, renumbered
-                std::vector<int32_t> remap(nv, -1);
-                PackedVector3Array pos, nrm;
-                PackedVector2Array uv;
-                PackedColorArray col;
-                PackedInt32Array idx;
-                bool prelit = false;
-                for (uint32_t i = 0; i < batch.indexCount; i += 3) {
-                    // Godot's front faces wind the other way after the axis swap
-                    const uint32_t tri[3] = {s.indices[batch.firstIndex + i], s.indices[batch.firstIndex + i + 2],
-                                             s.indices[batch.firstIndex + i + 1]};
-                    for (uint32_t src : tri) {
-                        if (remap[src] < 0) {
-                            const float* v = &s.vertices[size_t(src) * ina::kVertexFloats];
-                            remap[src] = int32_t(pos.size());
-                            pos.push_back(toGodot(v));
-                            const float len = std::sqrt(v[3] * v[3] + v[4] * v[4] + v[5] * v[5]);
-                            float ambient = 1.0f;
-                            if (len > 2.5f) prelit = true;
-                            else if (len > 1.001f) ambient = std::clamp(2.0f - len, 0.0f, 1.0f);
-                            const float n[3] = {v[3], v[4], v[5]};
-                            Vector3 gn = dirToGodot(n);
-                            nrm.push_back(len > 1e-6f ? gn / len : Vector3(0, 1, 0));
-                            uv.push_back(Vector2(v[6], v[7]));
-                            col.push_back(Color(ambient, ambient, ambient, 1.0f));
-                        }
-                        idx.push_back(remap[src]);
-                    }
-                }
-                if (pos.is_empty()) continue;
-                {
-                    // self-lit and decal surfaces whose texture is missing would show as flat white sheets
-                    const uint64_t k = bi < ch.textureKeys.size() ? ch.textureKeys[bi] : 0;
-                    const bool decalOrLit = prelit || batch.mode == ina::DrawMode::Decal;
-                    auto it = d_->textures.find(k);
-                    if (decalOrLit && (!k || it == d_->textures.end() || it->second.is_null())) continue;
-                }
-                Array arrays;
-                arrays.resize(Mesh::ARRAY_MAX);
-                arrays[Mesh::ARRAY_VERTEX] = pos;
-                arrays[Mesh::ARRAY_NORMAL] = nrm;
-                arrays[Mesh::ARRAY_TEX_UV] = uv;
-                arrays[Mesh::ARRAY_COLOR] = col;
-                arrays[Mesh::ARRAY_INDEX] = idx;
-                mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-                tris += size_t(idx.size()) / 3;
-                const int kind = prelit ? 3 : batch.mode == ina::DrawMode::Cutout ? 1 : batch.mode == ina::DrawMode::Decal ? 2 : 0;
-                const uint64_t key = bi < ch.textureKeys.size() ? ch.textureKeys[bi] : 0;
-                Ref<ShaderMaterial>& mat = d_->materials[{kind, key, batch.tint}];
-                if (getenv("INA_DEBUG_TEX") && key) {
-                    const Vector3 c = pos[0];
-                    const Vector3 eye = toGodot(std::array<float, 3>{float(x), float(y), 0.0f}.data());
-                    const uint32_t oid = uint32_t(key);
-                    auto it = d_->textures.find(key);
-                    Color avg;
-                    if (it != d_->textures.end() && it->second.is_valid()) {
-                        Ref<Image> im = it->second->get_image();
-                        const int w = im->get_width(), h = im->get_height();
-                        for (int yy = 0; yy < 8; yy++)
-                            for (int xx = 0; xx < 8; xx++) avg += im->get_pixel(xx * w / 8, yy * h / 8) / 64.0f;
-                    }
-                    if ((c - eye).length() < 40.0f)
-                        log += "tex " + (oid < d_->names.size() ? d_->names[oid] : std::to_string(oid)) + " kind " + std::to_string(kind) +
-                               " avg " + std::to_string(avg.r) + "," + std::to_string(avg.g) + "," + std::to_string(avg.b) + " at " +
-                               std::to_string(c.x) + "," + std::to_string(c.y) + "," + std::to_string(c.z) + "\n";
-                }
-                if (mat.is_null()) {
-                    mat.instantiate();
-                    mat->set_shader(d_->shaders[kind]);
-                    auto it = d_->textures.find(key);
-                    const bool has = key && it != d_->textures.end() && it->second.is_valid();
-                    if (!has && getenv("INA_DEBUG_TEX"))
-                        log += "no texture: kind " + std::to_string(kind) + " key " + std::to_string(key) + " tris " +
-                               std::to_string(idx.size() / 3) + " at " + std::to_string(pos[0].x) + "," + std::to_string(pos[0].y) + "," + std::to_string(pos[0].z) + "\n";
-                    mat->set_shader_parameter("has_tex", has);
-                    // Godot's mat3 takes columns; the game's matrix is stored by rows
-                    const auto& t = batch.tint;
-                    mat->set_shader_parameter("tint", Basis(Vector3(t[0], t[3], t[6]), Vector3(t[1], t[4], t[7]), Vector3(t[2], t[5], t[8])));
-                    if (has) mat->set_shader_parameter("tex", it->second);
-                    if (kind == 2) mat->set_render_priority(std::min<int>(batch.layer, 100));
-                }
-                mesh->surface_set_material(mesh->get_surface_count() - 1, mat);
-            }
-            if (mesh->get_surface_count() == 0) continue;
-            MeshInstance3D* mi = memnew(MeshInstance3D);
-            mi->set_mesh(mesh);
-            root->add_child(mi);
-            meshes++;
-        }
+        for (ina::Chunk& ch : b.chunks) addChunk(root, ch, meshes, tris, log);
         for (const ina::WorldLight& l : b.lights) {
             if (getenv("INA_NO_LAMPS")) break;
             OmniLight3D* o = memnew(OmniLight3D);
@@ -555,25 +828,40 @@ Dictionary InaGame::time_of_day(const String& name) {
 }
 
 Dictionary InaGame::intro_camera(const String& clip_name, double t) {
+    return camera_clip("jb_intro_camera_1", clip_name, t);
+}
+
+// A camera file of the intro pack (e.g. "jb_intro_camera_1"): its animation node's rig, the clip by name (empty:
+// the first clip with frames that is not "init") and the file's camera_parent as the anchor.
+Dictionary InaGame::camera_clip(const String& file_name, const String& clip_name, double t) {
     Dictionary r;
     Impl& d = *d_;
+    const std::string file = file_name.utf8().get_data();
     const std::string want = clip_name.utf8().get_data();
-    if (!d.introRead || d.introClipName != want) {
+    if (!d.introRead || d.introClipName != file + "/" + want) {
         d.introRead = true;
         d.introOk = false;
-        d.introClipName = want;
+        d.introClipName = file + "/" + want;
+        d.introEvents.clear();
         try {
             const auto bytes = readPack("msn_jb_intro.sprig.xpp");
             if (!bytes.empty()) {
                 ina::Pack p(bytes);
+                const uint32_t f = ina::findProxyFile(p, d.names, file);
+                const auto range = f ? ina::subFileRange(p, f) : std::pair<uint32_t, uint32_t>{0, 0};
                 const ina::AnimSet set = ina::readAnimSet(p, d.names);
-                if (const ina::AnimNode* node = set.find(d.names, "anim_intro")) {
+                for (const ina::AnimNode& node : set.nodes) {
+                    if (node.offset < range.first || node.offset >= range.second) continue;
                     uint32_t block = 0;
-                    for (uint32_t k : node->clipObjects) {
+                    for (uint32_t k : node.clipObjects) {
                         const ina::ClipObject& c = set.clips[k];
-                        if (!c.blocks.empty() && c.nameOid < d.names.size() && d.names[c.nameOid] == want) block = c.blocks[0].block;
+                        if (c.blocks.empty() || c.nameOid >= d.names.size()) continue;
+                        const std::string cn = d.names[c.nameOid];
+                        if (want.empty() ? (cn != "init" && !block) : cn == want) {
+                            block = c.blocks[0].block;
+                            d.introEvents = c.events;
+                        }
                     }
-                    const auto range = ina::subFileRange(p, node->offset);
                     bool anchored = false;
                     for (uint32_t o : p.objects()) {
                         if (o < range.first || o >= range.second || size_t(o) + 0x70 > p.data().size()) continue;
@@ -586,15 +874,21 @@ Dictionary InaGame::intro_camera(const String& clip_name, double t) {
                         anchored = true;
                         break;
                     }
-                    if (block && anchored && p.isPointer(size_t(node->offset) + 0x80)) {
-                        d.introSkeleton = ina::readSkeletonAt(p, p.word(size_t(node->offset) + 0x80));
+                    // a node without its own rig (the helicopter camera) animates the same four-joint camera rig
+                    // as the others: borrow the first rig of the pack
+                    uint32_t rig = p.isPointer(size_t(node.offset) + 0x80) ? p.word(size_t(node.offset) + 0x80) : 0;
+                    for (const ina::AnimNode& other : set.nodes)
+                        if (!rig && p.isPointer(size_t(other.offset) + 0x80)) rig = p.word(size_t(other.offset) + 0x80);
+                    if (block && anchored && rig) {
+                        d.introSkeleton = ina::readSkeletonAt(p, rig);
                         d.introClip = ina::readClipAt(p, block);
-                        d.introOk = d.introSkeleton.jointCount >= 4 && d.introClip.frames > 1;
+                        d.introOk = d.introSkeleton.jointCount >= 2 && d.introClip.frames > 1;
+                        if (d.introOk) break;
                     }
                 }
             }
         } catch (const std::exception& e) {
-            log_ = String("intro camera: ") + e.what();
+            log_ = String("camera: ") + e.what();
         }
     }
     if (!d.introOk) return r;
@@ -603,11 +897,11 @@ Dictionary InaGame::intro_camera(const String& clip_name, double t) {
     std::vector<float> pose = d.introSkeleton.restPose;
     d.introClip.evaluate(tt * d.introClip.fps, pose);
     const std::vector<float> world = ina::poseToWorld(d.introSkeleton, pose);
-    if (world.size() < 4 * 12) return r;
+    if (world.size() < 2 * 12) return r;
     const float* m = &world[12];
     const float eye[3] = {m[3] + d.introAnchor[0], m[7] + d.introAnchor[1], m[11] + d.introAnchor[2]};
     const float forward[3] = {m[0], m[4], m[8]}, up[3] = {m[2], m[6], m[10]};
-    const float angle = 2.0f * std::atan2(std::fabs(pose[3 * 12 + 6]), std::fabs(pose[3 * 12 + 7]));
+    const float angle = d.introSkeleton.jointCount >= 4 ? 2.0f * std::atan2(std::fabs(pose[3 * 12 + 6]), std::fabs(pose[3 * 12 + 7])) : 0.0f;
     const float fovY = 2.0f * std::atan(std::tan(0.5f * std::clamp(angle, 0.1f, 2.6f)) * 9.0f / 16.0f);
     r["eye"] = toGodot(eye);
     r["eye_game"] = Vector3(eye[0], eye[1], eye[2]);
@@ -616,6 +910,14 @@ Dictionary InaGame::intro_camera(const String& clip_name, double t) {
     r["fov_y"] = fovY * 57.29578f;
     r["fov_rig"] = std::clamp(angle, 0.1f, 2.6f) * 57.29578f;
     r["duration"] = length;
+    Array events;   // the clip's named moments: the mission's script gets them as labels
+    for (const auto& e : d.introEvents) {
+        Dictionary ev;
+        ev["time"] = e.fraction * length;
+        ev["name"] = e.nameOid < d.names.size() ? String(d.names[e.nameOid].c_str()) : String();
+        events.push_back(ev);
+    }
+    r["events"] = events;
     r["anchor"] = Vector3(d.introAnchor[0], d.introAnchor[1], d.introAnchor[2]);
     return r;
 }

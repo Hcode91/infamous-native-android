@@ -348,16 +348,16 @@ func _load(folder: String, manifest: String) -> void:
 	var pt := game.texture("pause_item_selector.psd")
 	if pt != null:
 		plate.texture = pt
-	prompt.visible = true
+	logo.visible = false
 	if shot_path == "":
-		# Title music and the park at night. Which cues the game plays here is not read from its data yet:
-		# these are the files named for the start menu and for this park.
-		music = _play_mp3(game_folder + "/sounds/music/647_start_select_menu_temp.mp3", -2.0)
+		# the park's own ambience (the shared sound pack lists it for this park at night)
 		ambience = _play_mp3(game_folder + "/sounds/streaming_grains/8/i1_park_grnd_nite_nonpwrd.mp3", -10.0)
 	frames_after_load = 0
-	if autostart:
+	if shot_path == "" or autostart:
 		shot_path = ""
-		_start_opening()
+		_start_director()
+		if autostart:
+			opening_t = 0.0
 
 
 func _make_world(tod: Dictionary) -> void:
@@ -470,15 +470,12 @@ func _place_camera(clip: String, t: float) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if free_look:
-		_look_input(event)
-		return
-	if game == null or cam == null or playing:
+	if game == null or cam == null or director == null:
 		return
 	var start: bool = (event is InputEventScreenTouch and event.pressed) or (event is InputEventMouseButton and event.pressed) \
 		or (event is InputEventJoypadButton and event.pressed) or (event is InputEventKey and event.pressed)
-	if start:
-		_start_opening()
+	if start and prompt.visible:
+		director.pressed = true   # the script polls the start button
 
 
 func _process(delta: float) -> void:
@@ -490,6 +487,8 @@ func _process(delta: float) -> void:
 			print("saved ", shot_path)
 			get_tree().quit()
 		return
+	if autostart and director != null and prompt.visible:
+		director.pressed = true
 	if opening_t >= 0.0:
 		opening_t += delta
 		if not opening_shots.is_empty() and opening_t >= opening_shots[0]:
@@ -498,227 +497,34 @@ func _process(delta: float) -> void:
 			print("saved opening frame at ", at)
 			if opening_shots.is_empty():
 				get_tree().quit()
-	if dome != null:
-		_grow_dome(delta)
-	if free_look:
-		_look_process(delta)
-	if playing and cam != null and clip_running:
-		play_t += delta
-		_place_camera("start", min(play_t, duration))
-	elif prompt != null and prompt.visible:
+	if prompt != null and prompt.visible:
 		prompt.modulate.a = 0.6 + 0.4 * sin(Time.get_ticks_msec() / 500.0)
 
 
 # ---------------------------------------------------------------------------------------------------------
-# The opening after Start: the blast seen from the park, the logo card, the voices in the dark, then the
-# crater and the first objectives. Values marked "data" come from the intro mission's property sets
-# (fill_explode_world_bright, fill_explode_world_dying, fill_prologue_post_explode, todp_prologue_*);
-# the timings are matched to the reference recording.
+# The opening is the game's own mission script, run by the Director (director.gd). Between its parts the game
+# itself plays the logo movie and loads the crater; that is done here.
 
-const GROUND_ZERO := Vector3(-32900.0, 17800.0, 0.0)   # the crater in sector c8 (game space, cm)
-var dome: MeshInstance3D
-var dome_r := 0.0
-var dome_mat: ShaderMaterial
-var clip_running := false
-var overlay: ColorRect
-var subtitle: Label
-var brief: Label
-var texts := {}
-var free_look := false
-var yaw := 0.0
-var pitch := 0.0
-var look_vel := Vector2.ZERO
-var sounds: Array[AudioStreamPlayer] = []
+const GROUND_ZERO := Vector3(-21000.0, 24249.0, -1200.0)   # ground_zero_explosion in the intro pack (sector c12)
+var director: Director
 
 
 func _g(p: Vector3) -> Vector3:   # game space (cm, z up) to Godot (m, y up)
 	return Vector3(p.x, p.z, -p.y) * 0.01
 
 
-func _wait(secs: float) -> void:
-	await get_tree().create_timer(secs).timeout
+func _start_director() -> void:
+	director = Director.new()
+	add_child(director)
+	director.setup(self)
+	director.mission_finished.connect(_on_mission_finished)
+	director.start("RunCheckpointPrologue")
 
 
-func _sfx(rel: String, db := 0.0, loop := false) -> AudioStreamPlayer:
-	var p := _play_mp3(game_folder + "/sounds/" + rel, db)
-	if p != null:
-		(p.stream as AudioStreamMP3).loop = loop
-		sounds.append(p)
-	return p
-
-
-func _dialog_archive() -> String:
-	for c in [game_folder + "/dialog/archive/english.psarc", game_folder.get_base_dir() + "/dialog/archive/english.psarc",
-			game_folder.get_base_dir().get_base_dir() + "/dialog/archive/english.psarc"]:
-		if FileAccess.file_exists(c):
-			return c
-	return ""
-
-
-# One line of dialogue: its voice from the dialogue archive and its text as a subtitle.
-func _say(id: String, pad := 0.4) -> void:
-	subtitle.text = texts.get(id, "")
-	var len := 2.5
-	var arc := _dialog_archive()
-	if arc != "":
-		var bytes := game.archive_file(arc, "dialog/" + id + ".mp3")
-		if bytes.size() > 0:
-			var st := AudioStreamMP3.new()
-			st.data = bytes
-			var p := AudioStreamPlayer.new()
-			p.stream = st
-			add_child(p)
-			p.play()
-			p.finished.connect(p.queue_free)
-			len = st.get_length()
-	await _wait(len + pad)
-	subtitle.text = ""
-
-
-func _make_opening_ui() -> void:
-	overlay = ColorRect.new()
-	overlay.color = Color(1, 1, 1, 0)
-	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
-	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	ui.add_child(overlay)
-	subtitle = Label.new()
-	subtitle.anchor_left = 0.1
-	subtitle.anchor_right = 0.9
-	subtitle.anchor_top = 0.86
-	subtitle.anchor_bottom = 0.98
-	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	subtitle.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	subtitle.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	subtitle.add_theme_font_size_override("font_size", 22)
-	subtitle.add_theme_constant_override("outline_size", 6)
-	subtitle.add_theme_color_override("font_outline_color", Color.BLACK)
-	ui.add_child(subtitle)
-	brief = Label.new()
-	brief.anchor_left = 0.15
-	brief.anchor_right = 0.85
-	brief.anchor_top = 0.04
-	brief.anchor_bottom = 0.14
-	brief.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	brief.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	brief.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	brief.add_theme_font_size_override("font_size", 24)
-	brief.add_theme_constant_override("outline_size", 6)
-	brief.add_theme_color_override("font_outline_color", Color.BLACK)
-	ui.add_child(brief)
-
-
-func _fade(to_alpha: float, secs: float, color := Color.BLACK) -> void:
-	overlay.color = Color(color.r, color.g, color.b, overlay.color.a)
-	var tw := create_tween()
-	tw.tween_property(overlay, "color:a", to_alpha, secs)
-	await tw.finished
-
-
-func _make_dome() -> void:
-	# the Ray Sphere's blast: a hemisphere of electric light growing out of ground zero
-	dome = MeshInstance3D.new()
-	var m := SphereMesh.new()
-	m.radius = 1.0
-	m.height = 2.0
-	m.is_hemisphere = true
-	m.radial_segments = 48
-	m.rings = 24
-	dome.mesh = m
-	var sh := Shader.new()
-	sh.code = """
-shader_type spatial;
-render_mode unshaded, cull_disabled, blend_add, depth_draw_never, fog_disabled;
-uniform sampler2D noise : filter_linear_mipmap, repeat_enable;
-uniform float glow = 1.0;
-void fragment() {
-	vec2 uv = UV * vec2(6.0, 3.0);
-	float n = texture(noise, uv + vec2(TIME * 0.05, -TIME * 0.11)).r;
-	float n2 = texture(noise, uv * 1.7 + vec2(-TIME * 0.07, TIME * 0.04)).r;
-	float rim = pow(1.0 - abs(dot(NORMAL, VIEW)), 2.0);
-	float v = smoothstep(0.35, 0.8, n * n2 * 2.0) + rim * 0.8;
-	ALBEDO = mix(vec3(0.12, 0.35, 0.9), vec3(0.7, 0.85, 1.0), v) * (0.25 + 0.6 * v) * glow;
-}
-"""
-	dome_mat = ShaderMaterial.new()
-	dome_mat.shader = sh
-	var nt := game.texture("JB_noise_01.psd", "msn_jb_intro.sprig.xpp")
-	if nt != null:
-		dome_mat.set_shader_parameter("noise", nt)
-	dome.material_override = dome_mat
-	dome.position = _g(GROUND_ZERO)
-	dome.scale = Vector3.ONE * 0.01
-	add_child(dome)
-	dome_r = 1.0
-
-
-func _grow_dome(delta: float) -> void:
-	# fast at first, then slowing: about 300 m across by the end of the blast shots
-	dome_r += delta * max(3.0, 14.0 - dome_r * 0.05)
-	dome.scale = Vector3.ONE * dome_r
-
-
-func _start_opening() -> void:
-	if playing:
+func _on_mission_finished(entry: String) -> void:
+	if entry != "RunCheckpointPrologue":
 		return
-	playing = true
-	_run_opening()
-
-
-func _run_opening() -> void:
-	opening_t = 0.0
-	texts = game.strings("english")
-	_make_opening_ui()
-	prompt.visible = false
-	logo.visible = false
-	_fade_out(music, 1.0)
-	music = null
-	play_t = 0.0
-	clip_running = true
-	# the city's power dies (todp_prologue_startup: ambient and sky brightness 0)
-	_sfx("streaming_grains/4/jbintro_electroblast_v1.mp3")
-	var tw := create_tween().set_parallel()
-	for l in city_node.get_children():
-		if l is OmniLight3D:
-			tw.tween_property(l, "light_energy", 0.0, 0.4)
-	tw.tween_property(env, "ambient_light_energy", 0.3, 0.6)
-	tw.tween_property(env, "tonemap_exposure", 1.4, 0.6)
-	_make_dome()
-	await _wait(1.0)
-	# the blast: fill_explode_world_bright (white, at once) then fill_explode_world_dying (fading over 5 s)
-	_sfx("streaming_grains/4/jbintro_blastinitial.mp3")
-	overlay.color = Color(1, 1, 1, 1)
-	var glow0 := env.glow_intensity
-	env.glow_intensity = 3.0
-	var tw2 := create_tween().set_parallel()
-	tw2.tween_property(overlay, "color:a", 0.0, 1.6).set_ease(Tween.EASE_IN)
-	tw2.tween_property(env, "glow_intensity", glow0, 5.0)
-	# fill_prologue_post_explode (data): fog (30, 30, 43) from 100 to 700 m at 0.8, colours desaturated
-	env.fog_light_color = Color8(30, 30, 43)
-	env.fog_depth_begin = 100.0
-	env.fog_depth_end = 700.0
-	env.fog_density = 0.8
-	env.adjustment_enabled = true
-	env.adjustment_saturation = 0.5
-	if ambience != null:
-		_fade_out(ambience, 2.0)
-		ambience = null
-	await _wait(3.0)
-	_sfx("streaming_grains/4/jbintro_blastwall_no_screams_v2.mp3", -2.0)
-	while play_t < duration + 3.0:
-		await get_tree().process_frame
-	clip_running = false
-	await _fade(1.0, 1.0)   # fill_fade_to_black (data: 1 s)
-	for p in sounds:
-		if is_instance_valid(p):
-			_fade_out(p, 1.5)
-	sounds.clear()
-	dome.queue_free()
-	dome = null
-	logo.visible = false
-
-	# the logo card, while the crater is built
-	remove_child(city_node)
-	city_node.queue_free()
+	# after the blast: the logo card while the crater is built, then the next part of the mission
 	var out := []
 	var task := WorkerThreadPool.add_task(func(): out.append(game.build_city(GROUND_ZERO.x, GROUND_ZERO.y, near_radius, 26000.0, true, true)))
 	var logo_path := game_folder + "/movies/cutscene/infamous_logo.bik"
@@ -727,127 +533,21 @@ func _run_opening() -> void:
 		add_child(card)
 		if card.play(logo_path, -1) == "":
 			card.skippable = false
-			_sfx("streaming_grains/4/jbintro_blastwave.mp3")
 			await card.finished
 		else:
 			card.queue_free()
-	# in the dark: Kessler's voice over the radio (m_jbintro_intro_01-03)
-	await _wait(1.0)
-	for id in ["m_jbintro_intro_01_kes", "m_jbintro_intro_02_kes", "m_jbintro_intro_03_kes"]:
-		await _say(id)
 	while not WorkerThreadPool.is_task_completed(task):
 		await get_tree().process_frame
 	WorkerThreadPool.wait_for_task_completion(task)
+	for c in get_children():
+		if c is WorldEnvironment or c is DirectionalLight3D or c == city_node:
+			c.queue_free()
 	city_node = out[0]
 	add_child(city_node)
-	_make_crater_world()
-	await _place_in_crater()
-	_sfx("streaming_grains/3/jbintro_gz_amb.mp3", -4.0, true)
-	await _fade(0.0, 3.0)   # fill_fade_from_black (data: 3 s)
-	await _say("m_jbintro_intro_04_hro")
-	await _say("m_jbintro_intro_05_hro")
-
-	# the first objective: look up at the news chopper
-	free_look = true
-	_sfx("streaming_grains/3/raysphereloop.mp3", -14.0, true)
-	await _say("m_jbintro_crater_01_brd")
-	brief.text = texts.get("u_brief_jbintro_right_analog_stick_up", "")
-	while pitch < deg_to_rad(30.0):
-		if opening_shots.size() > 0 and opening_t > 60.0:
-			break   # unattended check run: carry on
-		await get_tree().process_frame
-	brief.text = ""
-	for id in ["m_jbintro_crater_02_brd", "m_jbintro_crater_03_brd", "m_jbintro_crater_04_hro"]:
-		await _say(id)
-	await _say("m_pickups_jbintro_01_hro")
-	brief.text = texts.get("u_brief_jbintro_bridge", "")
-
-
-func _make_crater_world() -> void:
-	# after the blast: the intro's own time of day (fires, orange haze) and fill_prologue_post_explode
-	for c in get_children():
-		if c is WorldEnvironment or c is DirectionalLight3D:
-			c.queue_free()
-	var tod := game.time_of_day("jbintro")
-	_make_world(tod)
-	env.tonemap_exposure = 1.6
-	env.fog_light_color = Color8(30, 30, 43).lerp(tod.get("haze", Color(0.2, 0.1, 0.04)), 0.5)
-	env.fog_depth_begin = 10.0
-	env.fog_depth_end = 250.0
-	env.fog_density = 0.8
-	env.adjustment_enabled = true
-	env.adjustment_saturation = 0.65
-
-
-func _place_in_crater() -> void:
-	# Somewhere open on the crater floor near ground zero, from the built geometry: collision for the pieces
-	# around it, then rays down to the floor and up to the sky (the wreckage leaves pockets roofed over).
-	var at := _g(GROUND_ZERO)
-	var area := AABB(at - Vector3(45, 40, 45), Vector3(90, 60, 90))
-	for mi in city_node.get_children():
-		if mi is MeshInstance3D:
-			var box: AABB = mi.get_aabb()
-			if box.intersects(area):
-				mi.create_trimesh_collision()
-	await get_tree().physics_frame
-	await get_tree().physics_frame
-	var space := get_world_3d().direct_space_state
-	var best := Vector3.INF
-	var best_score := INF
-	for ix in range(-8, 9):
-		for iz in range(-8, 9):
-			var p := at + Vector3(ix * 5.0, 0, iz * 5.0)
-			var down := space.intersect_ray(PhysicsRayQueryParameters3D.create(p + Vector3(0, -2, 0), p + Vector3(0, -40, 0)))
-			if not down.has("position"):
-				continue
-			var f: Vector3 = down["position"]
-			if down["normal"].y < 0.7:
-				continue
-			var up := space.intersect_ray(PhysicsRayQueryParameters3D.create(f + Vector3(0, 0.3, 0), f + Vector3(0, 40, 0)))
-			if up.has("position"):
-				continue
-			# room to look around: nothing within 8 m at eye height
-			var open := true
-			for k in 8:
-				var d := Vector3(cos(k * PI / 4.0), 0, sin(k * PI / 4.0)) * 8.0
-				var e := f + Vector3(0, 1.7, 0)
-				if space.intersect_ray(PhysicsRayQueryParameters3D.create(e, e + d)).has("position"):
-					open = false
-					break
-			if not open:
-				continue
-			var score := Vector2(ix, iz).length() + f.y * 0.2   # near the centre, then low
-			if score < best_score:
-				best_score = score
-				best = f
-	if best == Vector3.INF:
-		best = at + Vector3(0, -7, 0)
-	cam.global_position = best + Vector3(0, 1.7, 0)
-	# face ground zero's centre, slightly down
-	var to := at - best
-	yaw = atan2(-to.x, -to.z) if Vector2(to.x, to.z).length() > 1.0 else 0.0
-	pitch = -0.1
-	cam.fov = 60.0
-	cam.rotation = Vector3(pitch, yaw, 0)
-	print("crater floor at ", best)
-
-
-func _look_input(event: InputEvent) -> void:
-	if event is InputEventScreenDrag:
-		look_vel = Vector2.ZERO
-		yaw -= event.relative.x * 0.004
-		pitch = clamp(pitch - event.relative.y * 0.004, -1.2, 1.3)
-	elif event is InputEventMouseMotion and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
-		yaw -= event.relative.x * 0.004
-		pitch = clamp(pitch - event.relative.y * 0.004, -1.2, 1.3)
-
-
-func _look_process(delta: float) -> void:
-	# the right stick, as in the game's prompt
-	var stick := Vector2(Input.get_joy_axis(0, JOY_AXIS_RIGHT_X), Input.get_joy_axis(0, JOY_AXIS_RIGHT_Y))
-	if stick.length() > 0.15:
-		yaw -= stick.x * 2.0 * delta
-		pitch = clamp(pitch - stick.y * 1.6 * delta, -1.2, 1.3)
-	if opening_shots.size() > 0:
-		pitch = min(pitch + 0.4 * delta, 0.7)   # unattended check run: look up on its own
-	cam.rotation = Vector3(pitch, yaw, 0)
+	_make_world(game.time_of_day("jbintro"))
+	director.queue_free()
+	director = Director.new()
+	add_child(director)
+	director.setup(self)
+	director.mission_finished.connect(_on_mission_finished)
+	director.start("RunCheckpointIntro")
