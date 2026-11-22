@@ -168,6 +168,17 @@ func _load(folder: String, manifest: String) -> void:
 	c.save(SETTINGS)
 	ui.get_node("FolderRow").visible = false
 
+	# the boot movie (publisher and studio logos), while the city is built behind it
+	var splash: BinkPlayer = null
+	if shot_path == "" and FileAccess.file_exists(folder + "/movies/cutscene/splash_europe.bik"):
+		splash = BinkPlayer.new()
+		add_child(splash)
+		var merr := splash.play(folder + "/movies/cutscene/splash_europe.bik")
+		if merr != "":
+			print(merr)
+			splash.queue_free()
+			splash = null
+
 	var shot := game.intro_camera("start", 0.0)
 	if shot.is_empty():
 		status.text = "The opening's camera was not found: " + game.last_log()
@@ -177,8 +188,16 @@ func _load(folder: String, manifest: String) -> void:
 
 	status.text = "Building the city (this takes a while the first time)..."
 	await get_tree().process_frame
-	var city := game.build_city(anchor.x, anchor.y, near_radius, 26000.0, true)
-	add_child(city)
+	# built on a worker thread so the boot movie keeps playing
+	var out := []   # a lambda can't assign to a captured local, so the result goes in an array
+	var task := WorkerThreadPool.add_task(func(): out.append(game.build_city(anchor.x, anchor.y, near_radius, 26000.0, true)))
+	while not WorkerThreadPool.is_task_completed(task):
+		await get_tree().process_frame
+	WorkerThreadPool.wait_for_task_completion(task)
+	add_child(out[0])
+	if splash != null and is_instance_valid(splash) and not splash.done:
+		status.text = ""
+		await splash.finished
 	print(game.last_log())
 
 	var tod := game.time_of_day("predawn")

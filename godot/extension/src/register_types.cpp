@@ -4,12 +4,14 @@
 #include <godot_cpp/godot.hpp>
 
 #include "ina_game.h"
+#include "ina_movie.h"
 
 using namespace godot;
 
 static void initialize(ModuleInitializationLevel level) {
     if (level != MODULE_INITIALIZATION_LEVEL_SCENE) return;
     GDREGISTER_CLASS(InaGame);
+    GDREGISTER_CLASS(InaMovie);
 }
 
 static void uninitialize(ModuleInitializationLevel) {}

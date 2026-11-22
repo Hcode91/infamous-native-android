@@ -14,3 +14,11 @@ renders one frame and quits.
 
 Coordinates: game (x, y, z) in centimetres with z up becomes Godot (x, z, -y) / 100.
 The title rests on the camera rig's clip `init`; its angle is used as the vertical field of view.
+
+## Movies
+
+The game's Bink movies (`movies/cutscene/*.bik` in the USRDIR) are played by `InaMovie`, using FFmpeg
+(LGPL 2.1) built with only the Bink demuxer and decoders: `extension/build_ffmpeg.sh`, then pass
+`-DFFMPEG_DIR=<prefix>` to CMake. The movies keep their sound as mono tracks: ids 1-6 are the 5.1 mix and
+id 10 + the console's language number is that language's voice track (11 English). The splash plays at
+start-up while the city is built on a worker thread.

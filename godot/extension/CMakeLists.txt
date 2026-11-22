@@ -25,8 +25,14 @@ target_include_directories(ina_engine PUBLIC ${ENGINE})
 find_package(ZLIB REQUIRED)
 target_link_libraries(ina_engine PUBLIC ZLIB::ZLIB)
 
-add_library(ina_godot SHARED src/register_types.cpp src/ina_game.cpp)
-target_link_libraries(ina_godot PRIVATE ina_engine godot::cpp)
+# FFmpeg built with only the Bink demuxer and decoders (see godot/README.md), for the game's movies.
+set(FFMPEG_DIR "" CACHE PATH "FFmpeg install prefix (static libavformat, libavcodec, libswscale, libavutil)")
+add_library(ina_godot SHARED src/register_types.cpp src/ina_game.cpp src/ina_movie.cpp)
+target_include_directories(ina_godot PRIVATE "${FFMPEG_DIR}/include")
+target_link_libraries(ina_godot PRIVATE ina_engine godot::cpp
+    "${FFMPEG_DIR}/lib/libavformat.a" "${FFMPEG_DIR}/lib/libavcodec.a" "${FFMPEG_DIR}/lib/libswscale.a"
+    "${FFMPEG_DIR}/lib/libavutil.a" m)
+target_link_options(ina_godot PRIVATE "-Wl,-Bsymbolic")
 if(ANDROID)
     set_target_properties(ina_godot PROPERTIES OUTPUT_NAME "ina_godot.android.arm64")
     target_link_options(ina_godot PRIVATE "-Wl,-z,max-page-size=16384")
