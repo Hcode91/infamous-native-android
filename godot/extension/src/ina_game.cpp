@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <tuple>
 #include <chrono>
 #include <cmath>
@@ -270,11 +271,23 @@ std::vector<uint8_t> InaGame::readPack(const std::string& name) {
     return {};
 }
 
+// The game's installed copy keeps its archives in separate folders (cache/psarc/install1, install2):
+// look in `dir`, then in the folders next to it.
+static std::string findBeside(const std::string& dir, const std::string& file) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (fs::exists(fs::path(dir) / file, ec)) return (fs::path(dir) / file).string();
+    const fs::path parent = fs::path(dir).parent_path();
+    for (fs::directory_iterator it(parent, ec), end; !ec && it != end; it.increment(ec))
+        if (it->is_directory(ec) && fs::exists(it->path() / file, ec)) return (it->path() / file).string();
+    return (fs::path(dir) / file).string();
+}
+
 String InaGame::open(const String& folder, const String& manifest) {
     const std::string dir = folder.utf8().get_data();
     try {
         d_->arcs[0] = std::make_unique<ina::Psarc>(dir + "/infamous1.psarc_s");
-        d_->arcs[1] = std::make_unique<ina::Psarc>(dir + "/infamous2.psarc_s");
+        d_->arcs[1] = std::make_unique<ina::Psarc>(findBeside(dir, "infamous2.psarc_s"));
     } catch (const std::exception& e) {
         return String("cannot open the game archives in ") + folder + ": " + e.what();
     }

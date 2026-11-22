@@ -257,6 +257,19 @@ func _make_ui() -> void:
 	ui.add_child(row)
 
 
+# The installed copy keeps the archives under USRDIR/cache/psarc/install1 and install2, while the movies,
+# sounds and dialogue sit in USRDIR itself: walk up to the folder that has "movies".
+func _usrdir(folder: String) -> String:
+	var d := folder
+	for i in 5:
+		if DirAccess.dir_exists_absolute(d + "/movies") or DirAccess.dir_exists_absolute(d + "/sounds"):
+			return d
+		if d.get_base_dir() == d:
+			break
+		d = d.get_base_dir()
+	return folder
+
+
 func _load(folder: String, manifest: String) -> void:
 	status.text = "Reading the game files..."
 	await get_tree().process_frame
@@ -270,7 +283,8 @@ func _load(folder: String, manifest: String) -> void:
 		return
 	_log("archives read")
 	game = g
-	game_folder = folder
+	game_folder = _usrdir(folder)
+	_log("game folder for movies and sounds: " + game_folder)
 	var c := ConfigFile.new()
 	c.set_value("files", "folder", folder)
 	c.set_value("files", "manifest", manifest)
@@ -279,10 +293,10 @@ func _load(folder: String, manifest: String) -> void:
 
 	# the boot movie (publisher and studio logos), while the city is built behind it
 	var splash: BinkPlayer = null
-	if shot_path == "" and FileAccess.file_exists(folder + "/movies/cutscene/splash_europe.bik"):
+	if shot_path == "" and FileAccess.file_exists(game_folder + "/movies/cutscene/splash_europe.bik"):
 		splash = BinkPlayer.new()
 		add_child(splash)
-		var merr := splash.play(folder + "/movies/cutscene/splash_europe.bik")
+		var merr := splash.play(game_folder + "/movies/cutscene/splash_europe.bik")
 		_log("splash: " + (merr if merr != "" else "playing"))
 		if merr != "":
 			splash.queue_free()
@@ -338,8 +352,8 @@ func _load(folder: String, manifest: String) -> void:
 	if shot_path == "":
 		# Title music and the park at night. Which cues the game plays here is not read from its data yet:
 		# these are the files named for the start menu and for this park.
-		music = _play_mp3(folder + "/sounds/music/647_start_select_menu_temp.mp3", -2.0)
-		ambience = _play_mp3(folder + "/sounds/streaming_grains/8/i1_park_grnd_nite_nonpwrd.mp3", -10.0)
+		music = _play_mp3(game_folder + "/sounds/music/647_start_select_menu_temp.mp3", -2.0)
+		ambience = _play_mp3(game_folder + "/sounds/streaming_grains/8/i1_park_grnd_nite_nonpwrd.mp3", -10.0)
 	frames_after_load = 0
 	if autostart:
 		shot_path = ""
