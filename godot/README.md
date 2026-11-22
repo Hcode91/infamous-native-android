@@ -22,3 +22,16 @@ The game's Bink movies (`movies/cutscene/*.bik` in the USRDIR) are played by `In
 `-DFFMPEG_DIR=<prefix>` to CMake. The movies keep their sound as mono tracks: ids 1-6 are the 5.1 mix and
 id 10 + the console's language number is that language's voice track (11 English). The splash plays at
 start-up while the city is built on a worker thread.
+
+## The opening after Start
+
+`main.gd` plays the blast from the park on the camera clip `start` (the city's lamps die, a white flash,
+the Ray Sphere's dome growing at ground zero in sector c8), fades to black, plays `infamous_logo.bik`,
+then Kessler's lines in the dark and the crater with the first prompts. Voices come from
+`dialog/archive/english.psarc` and their text, like the prompts, from `lang_english.xpp` (zero-ended
+id/text pairs). Effect strengths and fades are the intro mission's `Fill` and `TimeOfDayParams` sets;
+timings are matched to a recording. Known gaps: the crater floor (part of sector C8's ground does not
+decode yet), Cole, the news chopper, people in the streets.
+
+Unattended check: `--folder=<USRDIR> --shots=1,5,20` starts the opening at once and saves
+`/tmp/op_<t>.png` at those times.

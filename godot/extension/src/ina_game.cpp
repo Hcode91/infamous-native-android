@@ -208,11 +208,54 @@ Array InaGame::cube_faces(const String& name, const String& pack) {
     return out;
 }
 
+Dictionary InaGame::strings(const String& language) {
+    // the pack holds the table as zero-ended UTF-8 strings: an id (lower case, digits and '_'), then its text
+    Dictionary out;
+    const auto bytes = readPack("lang_" + std::string(language.utf8().get_data()) + ".xpp");
+    auto isId = [](const char* a, size_t n) {
+        if (n < 3 || n > 80 || !(a[0] >= 'a' && a[0] <= 'z')) return false;
+        for (size_t i = 0; i < n; i++)
+            if (!((a[i] >= 'a' && a[i] <= 'z') || (a[i] >= '0' && a[i] <= '9') || a[i] == '_')) return false;
+        return true;
+    };
+    const char* d = reinterpret_cast<const char*>(bytes.data());
+    size_t prev = 0, prevLen = 0, at = 0;
+    bool havePrev = false;
+    while (at < bytes.size()) {
+        size_t end = at;
+        while (end < bytes.size() && d[end]) end++;
+        const size_t len = end - at;
+        if (havePrev && len && isId(d + prev, prevLen) && !isId(d + at, len))
+            out[String::utf8(d + prev, int64_t(prevLen))] = String::utf8(d + at, int64_t(len));
+        prev = at;
+        prevLen = len;
+        havePrev = true;
+        at = end + 1;
+    }
+    return out;
+}
+
+PackedByteArray InaGame::archive_file(const String& archive, const String& name) {
+    PackedByteArray out;
+    try {
+        ina::Psarc a(archive.utf8().get_data());
+        const int i = a.find(name.utf8().get_data());
+        if (i < 0) return out;
+        const auto b = a.read(size_t(i));
+        out.resize(int64_t(b.size()));
+        memcpy(out.ptrw(), b.data(), b.size());
+    } catch (const std::exception&) {
+    }
+    return out;
+}
+
 void InaGame::_bind_methods() {
     ClassDB::bind_method(D_METHOD("cube_faces", "name", "pack"), &InaGame::cube_faces);
     ClassDB::bind_method(D_METHOD("texture", "name", "pack"), &InaGame::texture, DEFVAL(String()));
     ClassDB::bind_method(D_METHOD("open", "folder", "manifest"), &InaGame::open, DEFVAL(String()));
-    ClassDB::bind_method(D_METHOD("build_city", "x", "y", "near_radius", "radius", "far_city"), &InaGame::build_city);
+    ClassDB::bind_method(D_METHOD("build_city", "x", "y", "near_radius", "radius", "far_city", "after_blast"), &InaGame::build_city, DEFVAL(false));
+    ClassDB::bind_method(D_METHOD("strings", "language"), &InaGame::strings);
+    ClassDB::bind_method(D_METHOD("archive_file", "archive", "name"), &InaGame::archive_file);
     ClassDB::bind_method(D_METHOD("time_of_day", "name"), &InaGame::time_of_day);
     ClassDB::bind_method(D_METHOD("intro_camera", "clip", "t"), &InaGame::intro_camera);
     ClassDB::bind_method(D_METHOD("last_log"), &InaGame::last_log);
@@ -273,7 +316,7 @@ Ref<ImageTexture> makeTexture(const ina::TextureImage& img) {
 
 }  // namespace
 
-Node3D* InaGame::build_city(double x, double y, double near_radius, double radius, bool far_city) {
+Node3D* InaGame::build_city(double x, double y, double near_radius, double radius, bool far_city, bool after_blast) {
     Node3D* root = memnew(Node3D);
     root->set_name("City");
     if (!d_->layout) return root;
@@ -321,7 +364,7 @@ Node3D* InaGame::build_city(double x, double y, double near_radius, double radiu
                 // same tables as the street furniture; the title is before the blast, so it is left out by name until
                 // the game's own switch for it is found.
                 static const std::vector<std::string> skip = {"statue", "debris", "gravel", "cinder", "blocker", "two_by_four", "boulder", "lights_column", "artdeco_gate"};
-                props.scene = ina::buildSectorProps(p, d_->core.get(), d_->names, centre, nullptr, &skip);
+                props.scene = ina::buildSectorProps(p, d_->core.get(), d_->names, centre, nullptr, after_blast ? nullptr : &skip);
                 if (!props.scene.vertices.empty()) b.chunks.push_back(std::move(props));
                 try {
                     b.lights = ina::readSectorLights(p, ina::readScriptImage(p), d_->names, centre);
@@ -395,6 +438,13 @@ Node3D* InaGame::build_city(double x, double y, double near_radius, double radiu
                     }
                 }
                 if (pos.is_empty()) continue;
+                {
+                    // self-lit and decal surfaces whose texture is missing would show as flat white sheets
+                    const uint64_t k = bi < ch.textureKeys.size() ? ch.textureKeys[bi] : 0;
+                    const bool decalOrLit = prelit || batch.mode == ina::DrawMode::Decal;
+                    auto it = d_->textures.find(k);
+                    if (decalOrLit && (!k || it == d_->textures.end() || it->second.is_null())) continue;
+                }
                 Array arrays;
                 arrays.resize(Mesh::ARRAY_MAX);
                 arrays[Mesh::ARRAY_VERTEX] = pos;

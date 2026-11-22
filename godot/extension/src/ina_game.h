@@ -33,7 +33,12 @@ public:
     godot::String open(const godot::String& folder, const godot::String& manifest = godot::String());
     // The city around (x, y) in game coordinates: full detail for sectors whose centres are within near_radius,
     // low detail out to radius, the far city's stand-ins beyond.
-    godot::Node3D* build_city(double x, double y, double near_radius, double radius, bool far_city);
+    // after_blast: keep the blast's wreckage (left out for the title, which is before the blast)
+    godot::Node3D* build_city(double x, double y, double near_radius, double radius, bool far_city, bool after_blast = false);
+    // The game's text in a language ("english"): string id -> text, from lang_<language>.xpp.
+    godot::Dictionary strings(const godot::String& language);
+    // A file from a .psarc archive outside the game's two main ones (e.g. the dialogue archive). Empty when missing.
+    godot::PackedByteArray archive_file(const godot::String& archive, const godot::String& name);
     // "predawn", "jbintro", ...: ambient, sun, to_sun, haze colour, haze_start/end/mid (metres), sky pack.
     godot::Dictionary time_of_day(const godot::String& name);
     // The opening's camera (animation "anim_intro": clips "init" = the title, "start" = after Start,
