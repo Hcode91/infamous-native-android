@@ -171,18 +171,34 @@ std::vector<std::string> ScriptedMission::takeUnhandled() {
     return u;
 }
 
+// A path shape (e.g. shape_heli_1): +0x50 rotation, +0x60 position, +0x98 point count, then offsets to its
+// arrays, each relative to its own slot and rounded down to 16 bytes: the points as (x, y, z, 1) in the
+// shape's own space, then the in and out tangents (w 0) and the knot values. The points are returned in the
+// world (turned by the shape's rotation and moved to its position); the curve between them is drawn straight.
 std::vector<std::array<float, 3>> ScriptedMission::shapePoints(const std::string& name) const {
     std::vector<std::array<float, 3>> out;
+    const auto& d = pack_.data();
     for (uint32_t obj : pack_.objects()) {
-        if (size_t(obj) + 0xA0 > pack_.data().size()) continue;
+        if (size_t(obj) + 0xA0 > d.size()) continue;
         const uint32_t oid = pack_.word(size_t(obj) + 0x0C);
         if (oid >= names_.size() || names_[oid] != name) continue;
         const uint32_t n = pack_.word(size_t(obj) + 0x98);
-        for (uint32_t i = 0; i < n && i < 256; i++) {
-            const uint32_t at = pack_.word(size_t(obj) + 0x9C + 4 * size_t(i));
-            if (size_t(at) + 0x34 > pack_.data().size()) break;
+        const size_t slot = size_t(obj) + 0x9C;
+        const size_t base = (slot + pack_.word(slot)) & ~size_t(15);
+        float q[4], o[3];
+        for (int k = 0; k < 4; k++) q[k] = wordFloat(pack_.word(size_t(obj) + 0x50 + 4 * size_t(k)));
+        for (int k = 0; k < 3; k++) o[k] = wordFloat(pack_.word(size_t(obj) + 0x60 + 4 * size_t(k)));
+        if (q[0] == 0 && q[1] == 0 && q[2] == 0 && q[3] == 0) q[3] = 1;
+        for (uint32_t i = 0; i < n && i < 256 && base + 16 * (i + 1) <= d.size(); i++) {
+            float v[3];
+            for (int k = 0; k < 3; k++) v[k] = wordFloat(pack_.word(base + 16 * i + 4 * size_t(k)));
+            if (!std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2])) break;
+            // v' = v + 2w(u x v) + 2u x (u x v), u = (q0, q1, q2), w = q3
+            const float t[3] = {2 * (q[1] * v[2] - q[2] * v[1]), 2 * (q[2] * v[0] - q[0] * v[2]), 2 * (q[0] * v[1] - q[1] * v[0])};
             std::array<float, 3> p{};
-            for (int k = 0; k < 3; k++) p[size_t(k)] = wordFloat(pack_.word(size_t(at) + 0x28 + 4 * size_t(k)));
+            p[0] = o[0] + v[0] + q[3] * t[0] + (q[1] * t[2] - q[2] * t[1]);
+            p[1] = o[1] + v[1] + q[3] * t[1] + (q[2] * t[0] - q[0] * t[2]);
+            p[2] = o[2] + v[2] + q[3] * t[2] + (q[0] * t[1] - q[1] * t[0]);
             out.push_back(p);
         }
         break;
@@ -295,6 +311,13 @@ void ScriptedMission::moveProps(float dt) {
             continue;
         }
         if (!p.moving) continue;
+        // a value the script computed from something not modelled here (its physics queries) can be NaN:
+        // treat it as no motion on that axis rather than losing the prop
+        for (int k = 0; k < 3; k++) {
+            if (!std::isfinite(p.vel[k])) p.vel[k] = 0;
+            if (!std::isfinite(p.gravity[k])) p.gravity[k] = 0;
+            if (!std::isfinite(p.spin[k])) p.spin[k] = 0;
+        }
         for (int k = 0; k < 3; k++) {
             p.vel[k] += p.gravity[k] * dt;
             p.at.pos[k] += p.vel[k] * dt;
@@ -597,9 +620,9 @@ void ScriptedMission::hook() {
                 c.thread->yielded = true;
                 return true;
             }
-            if (member == "ParentHeli") {   // the camera rides on the helicopter that follows a path
-                for (const auto& [h, p] : self->props)
-                    if (!p.path.empty() && p.model.find("helicopter") != std::string::npos) { self->cameraParents[object] = h; break; }
+            if (member == "ParentHeli") {   // the camera rides on the helicopter that follows a path; its path
+                // may be given after this call, so which one is chosen when the camera is placed (heliFor)
+                self->cameraParents[object] = 0;
                 return true;
             }
             if (member == "SetCallbackObject" || member == "ParentToCamera" || member == "SetPlayTime") return true;
@@ -765,7 +788,12 @@ void ScriptedMission::hook() {
             if (!c.isSet && what == "pos" && scriptTypeSize(c.type) == 16) { writeVec(c.value, p.at.pos); return true; }
             if (what == "weight_class" || what == "SET_IMPACT_DAMAGE_VELOCITIES") return true;   // collision settings: no collision here
             if (c.isSet && scriptTypeSize(c.type) == 16) {
-                if (what == "pos") { readVec(c.value, p.at.pos); return true; }
+                if (what == "pos") {
+                    float v[3];
+                    readVec(c.value, v);
+                    for (int k = 0; k < 3; k++) if (std::isfinite(v[k])) p.at.pos[k] = v[k];
+                    return true;
+                }
                 if (what == "VELOCITY") {
                     readVec(c.value, p.vel);
                     p.moving = p.vel[0] != 0 || p.vel[1] != 0 || p.vel[2] != 0 || p.moving;

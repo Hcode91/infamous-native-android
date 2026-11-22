@@ -26,6 +26,7 @@ add_library(ina_core STATIC
     engine/world/scene.cpp
     engine/world/spawn.cpp
     engine/world/scripted_mission.cpp
+    engine/world/ui_scene.cpp
     engine/world/time_of_day.cpp
     engine/world/sector_lights.cpp
     engine/world/city_stream.cpp

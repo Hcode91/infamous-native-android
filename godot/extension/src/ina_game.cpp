@@ -142,6 +142,8 @@ struct InaGame::Impl {
     std::vector<uint8_t> missionBytes;
     std::unique_ptr<ina::Pack> missionPack;
     std::unique_ptr<ina::ScriptedMission> mission;
+    std::map<std::string, ina::UiScene> uiScenes;
+    std::map<std::string, Dictionary> uiCache;
     decltype(ina::textureIndex(std::declval<const ina::Pack&>())) missionTex;
     bool missionTexReady = false;
     double missionNow = 0;
@@ -520,8 +522,16 @@ Dictionary InaGame::mission_camera_parent(const String& camera) {
     if (!d_->mission) return r;
     const auto it = d_->mission->cameraParents.find(camera.utf8().get_data());
     if (it == d_->mission->cameraParents.end()) return r;
-    const auto p = d_->mission->props.find(it->second);
-    if (p == d_->mission->props.end()) return r;
+    auto p = d_->mission->props.find(it->second);
+    if (it->second == 0 || p == d_->mission->props.end()) {   // the helicopter flying a path, else any helicopter
+        p = d_->mission->props.end();
+        for (auto q = d_->mission->props.begin(); q != d_->mission->props.end(); ++q) {
+            if (q->second.model.find("helicopter") == std::string::npos) continue;
+            if (!q->second.path.empty()) { p = q; break; }
+            if (p == d_->mission->props.end()) p = q;
+        }
+        if (p == d_->mission->props.end()) return r;
+    }
     r["position"] = toGodot(p->second.at.pos);
     r["rotation"] = quatToGodot(p->second.at.q);
     return r;
@@ -539,7 +549,96 @@ Variant InaGame::mission_object(const String& name) {
     return toGodot(it->second.pos);
 }
 
+Dictionary InaGame::ui_scene(const String& name_) {
+    Dictionary r;
+    const std::string name = name_.utf8().get_data();
+    auto it = d_->uiScenes.find(name);
+    if (it == d_->uiScenes.end()) {
+        const auto bytes = readPack("msn_jb_intro.sprig.xpp");
+        if (bytes.empty()) return r;
+        ina::Pack p(bytes);
+        ina::UiScene sc = ina::readUiScene(p, d_->names, name);
+        // textures come with the scene (decoded now, from the intro pack or the shared one)
+        const auto own = ina::textureIndex(p);
+        Array els;
+        for (const ina::UiElement& e : sc.elements) {
+            Dictionary el;
+            el["name"] = String(e.name.c_str());
+            el["joint"] = e.joint;
+            el["rect"] = Rect2(e.min[0], e.min[1], e.max[0] - e.min[0], e.max[1] - e.min[1]);
+            el["offset"] = Vector2(e.offset[0], e.offset[1]);
+            Ref<ImageTexture> tex;
+            if (e.textureOid && e.textureOid < d_->names.size()) {
+                tex = texture(String(d_->names[e.textureOid].c_str()), "msn_jb_intro.sprig.xpp");
+            }
+            el["texture"] = tex;
+            els.push_back(el);
+        }
+        d_->uiCache[name]["elements"] = els;
+        it = d_->uiScenes.emplace(name, std::move(sc)).first;
+    }
+    const ina::UiScene& sc = it->second;
+    r["elements"] = d_->uiCache[name]["elements"];
+    Array texts;
+    for (const ina::UiTextBox& t : sc.texts) {
+        Dictionary d;
+        d["name"] = String(t.name.c_str());
+        d["joint"] = t.joint;
+        d["size"] = Vector2(t.size[0], t.size[1]);
+        d["font_size"] = t.fontSize;
+        d["offset"] = Vector2(t.offset[0], t.offset[1]);
+        texts.push_back(d);
+    }
+    r["texts"] = texts;
+    Dictionary anims;
+    for (const ina::UiAnim& a : sc.anims) {
+        Array clips;
+        for (const auto& [n, c] : a.clips) clips.push_back(String(n.c_str()));
+        anims[String(a.name.c_str())] = clips;
+    }
+    r["anims"] = anims;
+    r["joints"] = sc.joints;
+    return r;
+}
+
+Dictionary InaGame::ui_pose(const String& name, const String& anim, const String& clip, double t) {
+    Dictionary r;
+    const auto it = d_->uiScenes.find(name.utf8().get_data());
+    if (it == d_->uiScenes.end()) return r;
+    float dur = 0;
+    const std::vector<float> p = ina::uiPose(it->second, anim.utf8().get_data(), clip.utf8().get_data(), float(t), &dur);
+    PackedFloat32Array a;
+    a.resize(int64_t(p.size()));
+    for (size_t i = 0; i < p.size(); i++) a.set(int64_t(i), p[i]);
+    r["joints"] = a;
+    r["duration"] = dur;
+    return r;
+}
+
+Dictionary InaGame::ui_font(const String& font, const String& language) {
+    Dictionary r;
+    const std::string packName = "lang_" + std::string(language.utf8().get_data()) + ".xpp";
+    const auto bytes = readPack(packName);
+    if (bytes.empty()) return r;
+    ina::Pack p(bytes);
+    const ina::UiFont f = ina::readUiFont(p, d_->names, font.utf8().get_data());
+    if (!f.textureOid || f.textureOid >= d_->names.size()) return r;
+    r["texture"] = texture(String(d_->names[f.textureOid].c_str()), String(packName.c_str()));
+    r["line"] = f.lineHeight;
+    Array glyphs;
+    for (const ina::UiGlyph& g : f.glyphs) {
+        PackedInt32Array a;
+        for (int v : {int(g.code), g.x, g.y, g.w, g.h, g.xoff, g.yoff, g.advance}) a.push_back(v);
+        glyphs.push_back(a);
+    }
+    r["glyphs"] = glyphs;
+    return r;
+}
+
 void InaGame::_bind_methods() {
+    ClassDB::bind_method(D_METHOD("ui_scene", "name"), &InaGame::ui_scene);
+    ClassDB::bind_method(D_METHOD("ui_pose", "name", "anim", "clip", "t"), &InaGame::ui_pose);
+    ClassDB::bind_method(D_METHOD("ui_font", "font", "language"), &InaGame::ui_font);
     ClassDB::bind_method(D_METHOD("mission_start", "pack", "entry"), &InaGame::mission_start);
     ClassDB::bind_method(D_METHOD("mission_update", "dt", "button_pressed"), &InaGame::mission_update);
     ClassDB::bind_method(D_METHOD("mission_state"), &InaGame::mission_state);

@@ -10,6 +10,7 @@
 
 #include "world/city_stream.h"
 #include "world/scripted_mission.h"
+#include "world/ui_scene.h"
 
 #include <map>
 #include <memory>
@@ -93,6 +94,15 @@ protected:
     godot::Dictionary camera_clip(const godot::String& file, const godot::String& clip, double t);
     godot::String mission_file_for(const godot::String& object);
     godot::Dictionary mission_camera_parent(const godot::String& camera);   // {position, rotation} of what it rides on
+
+    // The game's interface screens ("ui_press_start", ...) from the intro pack: elements {name, joint, texture,
+    // rect (Rect2, min to max around offset), offset}, texts {name, joint, size, font_size, offset}, anims
+    // {anim: [clips]}, joints. Units: pixels of a 1280x720 screen, origin in the middle, y up.
+    godot::Dictionary ui_scene(const godot::String& name);
+    // Joints at a time of a clip: {joints: 6 floats per joint (scale x, y, rotation z, x, y, z), duration}
+    godot::Dictionary ui_pose(const godot::String& name, const godot::String& anim, const godot::String& clip, double t);
+    // A bitmap font of the language pack: {texture, line, glyphs: Array of [code, x, y, w, h, xoff, yoff, advance]}
+    godot::Dictionary ui_font(const godot::String& font, const godot::String& language);
 
 private:
     void addChunk(godot::Node3D* root, const ina::Chunk& ch, size_t& meshes, size_t& tris, std::string& log);
